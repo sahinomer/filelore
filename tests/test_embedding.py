@@ -112,8 +112,10 @@ class FakeTorch:
         return nullcontext()
 
 
-def test_clip_backend_uses_fast_processor(
+@pytest.mark.parametrize("use_fast_processor", [True, False])
+def test_clip_backend_configures_processor(
     monkeypatch: pytest.MonkeyPatch,
+    use_fast_processor: bool,
 ) -> None:
     processor = object()
     model = object()
@@ -143,13 +145,15 @@ def test_clip_backend_uses_fast_processor(
     )
 
     loaded_torch, loaded_processor, loaded_model = clip._load_clip_backend(
-        "example/clip"
+        "example/clip", use_fast_processor
     )
 
     assert loaded_torch is torch_module
     assert loaded_processor is processor
     assert loaded_model is model
-    assert processor_calls == [("example/clip", {"use_fast": True})]
+    assert processor_calls == [
+        ("example/clip", {"use_fast": use_fast_processor})
+    ]
 
 
 def test_base_embedding_single_prediction_uses_batch_path() -> None:
@@ -175,16 +179,24 @@ def test_clip_embeds_single_and_batch_images_and_text(
 ) -> None:
     processor = FakeProcessor()
     model = FakeModel()
+
+    def load_backend(
+        model_id: str, use_fast_processor: bool
+    ) -> tuple[FakeTorch, FakeProcessor, FakeModel]:
+        assert model_id == "openai/clip-vit-base-patch32"
+        assert use_fast_processor is False
+        return FakeTorch(), processor, model
+
     monkeypatch.setattr(
         clip,
         "_load_clip_backend",
-        lambda _: (FakeTorch(), processor, model),
+        load_backend,
     )
     red_path = tmp_path / "red.png"
     Image.new("RGBA", (2, 2), (255, 0, 0, 100)).save(red_path)
     blue_image = Image.new("RGB", (2, 2), (0, 0, 255))
 
-    embedding = ClipImageEmbedding(batch_size=1)
+    embedding = ClipImageEmbedding(batch_size=1, use_fast_processor=False)
     image_vectors = embedding.predict_batch((red_path, blue_image))
     text_vector = embedding.predict_text("red")
     text_vectors = embedding.predict_text_batch(("green", "blue"))
@@ -209,7 +221,11 @@ def test_clip_rejects_ambiguous_batches_and_empty_text(
     monkeypatch.setattr(
         clip,
         "_load_clip_backend",
-        lambda _: (FakeTorch(), FakeProcessor(), FakeModel()),
+        lambda _model_id, _use_fast: (
+            FakeTorch(),
+            FakeProcessor(),
+            FakeModel(),
+        ),
     )
     embedding = ClipImageEmbedding()
 

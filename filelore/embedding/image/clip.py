@@ -17,7 +17,9 @@ DEFAULT_CLIP_MODEL = "openai/clip-vit-base-patch32"
 DEFAULT_CLIP_VECTOR_NAME = "image_clip_openai_vit_b32"
 
 
-def _load_clip_backend(model_id: str) -> tuple[Any, Any, Any]:
+def _load_clip_backend(
+    model_id: str, use_fast_processor: bool
+) -> tuple[Any, Any, Any]:
     """Load optional ML dependencies only when a CLIP embedder is created."""
     try:
         import torch
@@ -28,7 +30,9 @@ def _load_clip_backend(model_id: str) -> tuple[Any, Any, Any]:
             "run 'uv sync --extra embedding' from the repository root"
         ) from error
 
-    processor = AutoProcessor.from_pretrained(model_id, use_fast=True)
+    processor = AutoProcessor.from_pretrained(
+        model_id, use_fast=use_fast_processor
+    )
     model = CLIPModel.from_pretrained(model_id)
     return torch, processor, model
 
@@ -50,11 +54,14 @@ class ClipImageEmbedding(ImageEmbedding):
         vector_name: str | None = None,
         device: str = "auto",
         batch_size: int = 32,
+        use_fast_processor: bool = True,
     ) -> None:
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
 
-        torch_module, processor, model = _load_clip_backend(model_id)
+        torch_module, processor, model = _load_clip_backend(
+            model_id, use_fast_processor
+        )
         projection_dimensions = getattr(model.config, "projection_dim", None)
         if not isinstance(projection_dimensions, int):
             raise ValueError(f"CLIP model {model_id!r} has no projection dimension")
