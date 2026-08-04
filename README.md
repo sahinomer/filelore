@@ -28,6 +28,14 @@ uv sync --extra embedding
 
 The embedding model is downloaded when it is used for the first time.
 
+## Tests
+
+Run the test suite with the test dependency group:
+
+```sh
+uv run --group test python -m pytest
+```
+
 ## Index
 
 Index the supported files under a directory:
@@ -57,13 +65,11 @@ uv run python -m filelore "a mountain landscape" \
   --limit 20
 ```
 
-## Roadmap / TODO
+## Areas of exploration
 
 - Text-document indexing and content search.
 - Audio indexing and semantic retrieval.
 - Speech transcription and search.
-
-These are areas for exploration rather than scheduled commitments.
 
 ## License
 
