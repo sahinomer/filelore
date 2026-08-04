@@ -1,0 +1,17 @@
+# Environment
+.env
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Local cache
+.cache/
+*.egg-info/
+
+# IDE
+.idea/
+
+# Data
+.data

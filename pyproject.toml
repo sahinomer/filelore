@@ -1,0 +1,33 @@
+[project]
+name = "filelore"
+version = "0.1.0"
+description = "A local-first file indexing and search experiment"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "Pillow>=10,<13",
+    "qdrant-client>=1.18,<2",
+]
+
+[project.optional-dependencies]
+embedding = [
+    "torch>=2.2,<3",
+    "torchvision>=0.17,<1",
+    "transformers>=4.50,<5",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+    { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
