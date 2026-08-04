@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
-import sys
 from datetime import date, datetime, time
 from pathlib import Path
 from time import perf_counter
 from typing import Callable, Sequence
 
+from filelore.cli_display import CliDisplay
 from filelore.embedding import ClipImageEmbedding, ImageEmbedding
 from filelore.index import (
-    FileIndexEntry,
     FileIndexRepository,
     FileMetadataQuery,
     file_metadata_filter,
@@ -143,6 +141,7 @@ def main(
     embedding_factory: EmbeddingFactory | None = None,
 ) -> int:
     args = build_argument_parser().parse_args(argv)
+    display = CliDisplay()
     selected_embedding_factory = _embedding_factory_for_target(
         args.target,
         override=embedding_factory,
@@ -151,7 +150,7 @@ def main(
 
     if args.index_directory is not None:
         if args.query is not None:
-            print("Search query cannot be combined with --index", file=sys.stderr)
+            display.print_error("Search query cannot be combined with --index")
             return 2
         if any(
             value is not None
@@ -165,7 +164,7 @@ def main(
                 args.limit,
             )
         ):
-            print("Search filters cannot be combined with --index", file=sys.stderr)
+            display.print_error("Search filters cannot be combined with --index")
             return 2
         batch_size = (
             args.batch_size
@@ -173,32 +172,33 @@ def main(
             else DEFAULT_BATCH_SIZE
         )
         if batch_size < 1:
-            print("Batch size must be positive", file=sys.stderr)
+            display.print_error("Batch size must be positive")
             return 2
         if not args.index_directory.expanduser().is_dir():
-            print(
-                f"Directory does not exist: {args.index_directory}",
-                file=sys.stderr,
+            display.print_error(
+                f"Directory does not exist: {args.index_directory}"
             )
             return 2
         metadata_query = None
     else:
         if args.no_recursive or args.batch_size is not None:
-            print("Index options require --index", file=sys.stderr)
+            display.print_error("Index options require --index")
             return 2
         if not semantic_query:
-            print("Search query is required unless --index is used", file=sys.stderr)
+            display.print_error(
+                "Search query is required unless --index is used"
+            )
             return 2
         result_limit = (
             args.limit if args.limit is not None else DEFAULT_RESULT_LIMIT
         )
         if result_limit < 1:
-            print("Search limit must be positive", file=sys.stderr)
+            display.print_error("Search limit must be positive")
             return 2
         try:
             metadata_query = _metadata_query(args)
         except ValueError as error:
-            print(f"Invalid search: {error}", file=sys.stderr)
+            display.print_error(f"Invalid search: {error}")
             return 2
 
     qdrant_url = args.qdrant_url
@@ -209,7 +209,8 @@ def main(
             url=qdrant_url,
         ) as database:
             if args.index_directory is not None:
-                embedding = selected_embedding_factory()
+                with display.status("Initializing image model…"):
+                    embedding = selected_embedding_factory()
                 vector_configs = {
                     embedding.vector_name: VectorConfig(
                         embedding.dimensions,
@@ -226,6 +227,7 @@ def main(
                     recursive=not args.no_recursive,
                     batch_size=batch_size,
                     processor=ImageProcessor(embedding=embedding),
+                    display=display,
                 )
             file_index = FileIndexRepository(database)
             assert metadata_query is not None
@@ -235,12 +237,15 @@ def main(
                 metadata_query,
                 result_limit,
                 selected_embedding_factory,
+                display,
             )
     except (EOFError, KeyboardInterrupt):
-        print()
+        display.print_error()
         return 130
     except Exception as error:
-        print(f"Could not use Qdrant at {database_target}: {error}", file=sys.stderr)
+        display.print_error(
+            f"Could not use Qdrant at {database_target}: {error}"
+        )
         return 2
 
 
@@ -261,16 +266,30 @@ def _index_images(
     recursive: bool,
     batch_size: int,
     processor: ImageProcessor,
+    display: CliDisplay,
 ) -> int:
-    paths = processor.discover(directory, recursive=recursive)
+    with display.status("Discovering images…"):
+        paths = tuple(processor.discover(directory, recursive=recursive))
     had_errors = False
     pending_paths: list[Path] = []
-    for path in paths:
-        pending_paths.append(path)
-        if len(pending_paths) >= batch_size:
-            had_errors |= _process_and_store(file_index, pending_paths, processor)
-            pending_paths.clear()
-    had_errors |= _process_and_store(file_index, pending_paths, processor)
+    with display.indexing(len(paths)) as progress:
+        for path in paths:
+            pending_paths.append(path)
+            if len(pending_paths) >= batch_size:
+                try:
+                    had_errors |= _process_and_store(
+                        file_index, pending_paths, processor, display
+                    )
+                finally:
+                    progress.advance(len(pending_paths))
+                pending_paths.clear()
+        if pending_paths:
+            try:
+                had_errors |= _process_and_store(
+                    file_index, pending_paths, processor, display
+                )
+            finally:
+                progress.advance(len(pending_paths))
     return 1 if had_errors else 0
 
 
@@ -278,37 +297,27 @@ def _process_and_store(
     file_index: FileIndexRepository,
     paths: Sequence[Path],
     processor: ImageProcessor,
+    display: CliDisplay,
 ) -> bool:
     batch = processor.process_batch(paths)
-    for failure in batch.failures:
-        print(f"Could not index {failure.path}: {failure.error}", file=sys.stderr)
-    _store_and_print(file_index, batch.files, processor.embedding)
+    with display.suspend():
+        for failure in batch.failures:
+            display.print_error(f"Could not index {failure.path}: {failure.error}")
+        _store(file_index, batch.files)
     return bool(batch.failures)
 
 
-def _store_and_print(
+def _store(
     file_index: FileIndexRepository,
     processed_files: Sequence[PreparedFile],
-    embedding: ImageEmbedding | None,
 ) -> None:
     if not processed_files:
         return
     metadata_items = [processed.metadata for processed in processed_files]
-    indexed_files = file_index.store_many(
+    file_index.store_many(
         metadata_items,
         vector_sets=[processed.vectors for processed in processed_files],
     )
-    for metadata, indexed_file in zip(metadata_items, indexed_files):
-        output = metadata.to_dict()
-        output["index_id"] = indexed_file.id
-        output["content_hash"] = indexed_file.content_hash
-        if embedding is not None:
-            output["embedding"] = {
-                "model_id": embedding.model_id,
-                "vector_name": embedding.vector_name,
-                "dimensions": embedding.dimensions,
-            }
-        print(json.dumps(output, ensure_ascii=False, sort_keys=True))
 
 
 def _metadata_query(args: argparse.Namespace) -> FileMetadataQuery:
@@ -359,11 +368,13 @@ def _search(
     metadata_query: FileMetadataQuery,
     limit: int,
     embedding_factory: EmbeddingFactory,
+    display: CliDisplay,
 ) -> int:
     total_started = perf_counter()
 
     initialization_started = perf_counter()
-    embedding = embedding_factory()
+    with display.status("Initializing image model…"):
+        embedding = embedding_factory()
     initialization_ms = (perf_counter() - initialization_started) * 1000
 
     embedding_started = perf_counter()
@@ -380,15 +391,16 @@ def _search(
     fetch_ms = (perf_counter() - fetch_started) * 1000
     total_ms = (perf_counter() - total_started) * 1000
 
-    for result in results:
-        _print_search_result(result.file, score=result.score)
-    print(f"Found {len(results)} semantic result(s) (limit {limit}).")
-    print(
-        "Timing: "
-        f"model initialization={_format_duration(initialization_ms)}; "
-        f"query embedding={_format_duration(embedding_ms)}; "
-        f"Qdrant fetch={_format_duration(fetch_ms)}; "
-        f"total={_format_duration(total_ms)}."
+    display.print_search_results(
+        results,
+        query=semantic_query,
+        limit=limit,
+        timings=(
+            ("model", _format_duration(initialization_ms)),
+            ("embedding", _format_duration(embedding_ms)),
+            ("search", _format_duration(fetch_ms)),
+            ("total", _format_duration(total_ms)),
+        ),
     )
     return 0
 
@@ -397,27 +409,6 @@ def _format_duration(duration_ms: float) -> str:
     if duration_ms >= 1000:
         return f"{duration_ms / 1000:.2f} s"
     return f"{duration_ms:.2f} ms"
-
-
-def _print_search_result(
-    result: FileIndexEntry,
-    *,
-    score: float | None = None,
-) -> None:
-    width = result.metadata.get("width", "?")
-    height = result.metadata.get("height", "?")
-    image_format = result.metadata.get(
-        "image_format", result.metadata.get("extension")
-    )
-    modified_at = result.metadata.get("modified_at", "unknown")
-    print(result.path)
-    details = (
-        f"  format={image_format} resolution={width}x{height} "
-        f"modified={modified_at}"
-    )
-    if score is not None:
-        details += f" score={score:.6f}"
-    print(details)
 
 
 def _parse_resolution(value: str, label: str) -> tuple[int | None, int | None]:

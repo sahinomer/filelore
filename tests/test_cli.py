@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import json
+import sys
+from io import StringIO
 from pathlib import Path
 from typing import Sequence
 
@@ -13,6 +14,7 @@ from filelore.cli import (
     build_argument_parser,
     main,
 )
+from filelore.cli_display import _directory_text, _format_modified_at
 from filelore.embedding import EmbeddingVector, ImageEmbedding
 
 
@@ -62,6 +64,11 @@ class ColorCliEmbedding(ImageEmbedding):
             expected_count=len(texts),
             normalize=True,
         )
+
+
+class TerminalStringIO(StringIO):
+    def isatty(self) -> bool:
+        return True
 
 
 def test_cli_defaults_to_persistent_local_qdrant_index(
@@ -123,11 +130,31 @@ def test_cli_formats_durations_with_readable_units() -> None:
     assert _format_duration(1.788) == "1.79 ms"
 
 
-def test_cli_prints_one_json_record_per_image(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_cli_formats_search_result_dates() -> None:
+    assert _format_modified_at("2025-01-02T15:04:05") == (
+        "Jan 2, 2025 at 15:04"
+    )
+
+
+def test_cli_links_search_result_directories(tmp_path: Path) -> None:
+    directory = tmp_path.resolve()
+
+    text = _directory_text(directory)
+
+    assert any(
+        getattr(span.style, "link", None) == directory.as_uri()
+        for span in text.spans
+    )
+
+
+def test_cli_indexing_shows_progress_without_printing_image_metadata(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("NO_COLOR", "1")
     first = tmp_path / "a.png"
-    second = tmp_path / "nested" / "b.jpg"
+    second = tmp_path / "b.jpg"
     create_image(first)
     create_image(second)
 
@@ -141,19 +168,70 @@ def test_cli_prints_one_json_record_per_image(
         embedding_factory=ColorCliEmbedding,
     )
 
+    captured = capsys.readouterr()
     assert exit_code == 0
-    records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert [record["path"] for record in records] == [
-        str(first.resolve()),
-        str(second.resolve()),
-    ]
-    assert all(record["width"] == 12 for record in records)
-    assert all(record["content_hash"] for record in records)
-    assert all(record["index_id"] for record in records)
-    assert all(
-        record["embedding"]["vector_name"] == "image_test_color"
-        for record in records
+    assert captured.out == ""
+    assert "Initializing image model" in captured.err
+    assert "Discovering images" in captured.err
+    assert "Indexing images" in captured.err
+    assert "2/2" in captured.err
+    assert "100%" in captured.err
+    assert str(first.resolve()) not in captured.err
+    assert str(second.resolve()) not in captured.err
+
+
+def test_cli_failed_files_still_complete_progress(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NO_COLOR", "1")
+    valid_path = tmp_path / "valid.png"
+    invalid_path = tmp_path / "invalid.png"
+    create_image(valid_path)
+    invalid_path.write_text("not an image", encoding="utf-8")
+
+    exit_code = main(
+        [
+            "--index",
+            str(tmp_path),
+            "--index-path",
+            str(tmp_path / "qdrant-index"),
+        ],
+        embedding_factory=ColorCliEmbedding,
     )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert f"Could not index {invalid_path}" in captured.err
+    assert "2/2" in captured.err
+    assert "100%" in captured.err
+
+
+def test_cli_empty_discovery_has_no_incomplete_progress_bar(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NO_COLOR", "1")
+
+    exit_code = main(
+        [
+            "--index",
+            str(tmp_path),
+            "--index-path",
+            str(tmp_path / "qdrant-index"),
+        ],
+        embedding_factory=ColorCliEmbedding,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == ""
+    assert "Discovering images" in captured.err
+    assert "Indexing images" not in captured.err
+    assert "0%" not in captured.err
 
 
 def test_cli_reports_invalid_images_and_indexes_the_remaining_files(
@@ -175,9 +253,8 @@ def test_cli_reports_invalid_images_and_indexes_the_remaining_files(
     )
 
     captured = capsys.readouterr()
-    records = [json.loads(line) for line in captured.out.splitlines()]
     assert exit_code == 1
-    assert [record["path"] for record in records] == [str(valid_path.resolve())]
+    assert captured.out == ""
     assert f"Could not index {invalid_path}" in captured.err
 
 
@@ -286,14 +363,20 @@ def test_cli_searches_with_optional_metadata_filters(
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert str(matching.resolve()) in captured.out
-    assert str(non_matching.resolve()) not in captured.out
-    assert "score=" in captured.out
-    assert "Found 1 semantic result(s)" in captured.out
-    assert "model initialization=" in captured.out
-    assert "query embedding=" in captured.out
-    assert "Qdrant fetch=" in captured.out
-    assert "total=" in captured.out
+    assert matching.name in captured.out
+    assert "Directory" in captured.out
+    assert non_matching.name not in captured.out
+    assert "100% match" in captured.out
+    assert "PNG" in captured.out
+    assert "12 × 8 px" in captured.out
+    assert "RGB" in captured.out
+    assert "Modified" in captured.out
+    assert "1 result" in captured.out
+    assert "Timing" in captured.out
+    assert "model " in captured.out
+    assert "embedding " in captured.out
+    assert "search " in captured.out
+    assert "total " in captured.out
 
 
 def test_cli_indexes_embeddings_and_searches_by_semantic_description(
@@ -316,16 +399,7 @@ def test_cli_indexes_embeddings_and_searches_by_semantic_description(
     )
 
     assert exit_code == 0
-    records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert all(
-        record["embedding"]
-        == {
-            "dimensions": 3,
-            "model_id": "test-color-model",
-            "vector_name": "image_test_color",
-        }
-        for record in records
-    )
+    assert capsys.readouterr().out == ""
     exit_code = main(
         ["red", "--index-path", str(database_path), "--target", "image"],
         embedding_factory=ColorCliEmbedding,
@@ -333,11 +407,80 @@ def test_cli_indexes_embeddings_and_searches_by_semantic_description(
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert captured.out.index(str(red_path.resolve())) < captured.out.index(
-        str(blue_path.resolve())
+    assert captured.out.index(red_path.name) < captured.out.index(blue_path.name)
+    assert "100% match" in captured.out
+    assert "0% match" in captured.out
+    assert "2 results" in captured.out
+    assert "Timing" in captured.out
+
+
+def test_cli_shows_search_model_initialization_on_stderr(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NO_COLOR", "1")
+    database_path = tmp_path / "qdrant-index"
+    image_path = tmp_path / "red.png"
+    Image.new("RGB", (8, 8), color=(255, 0, 0)).save(image_path)
+    assert (
+        main(
+            [
+                "--index",
+                str(tmp_path),
+                "--index-path",
+                str(database_path),
+            ],
+            embedding_factory=ColorCliEmbedding,
+        )
+        == 0
     )
-    assert "score=" in captured.out
-    assert "Found 2 semantic result(s)" in captured.out
-    assert "model initialization=" in captured.out
-    assert "query embedding=" in captured.out
-    assert "Qdrant fetch=" in captured.out
+    capsys.readouterr()
+
+    exit_code = main(
+        ["red", "--index-path", str(database_path)],
+        embedding_factory=ColorCliEmbedding,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Initializing image model" in captured.err
+    assert "Discovering images" not in captured.err
+    assert "Initializing image model" not in captured.out
+    assert image_path.name in captured.out
+    assert "Directory" in captured.out
+    assert "1 result" in captured.out
+    assert "Timing" in captured.out
+
+
+def test_cli_search_uses_score_colors_and_file_hyperlinks(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "qdrant-index"
+    red_path = tmp_path / "red.png"
+    blue_path = tmp_path / "blue.png"
+    Image.new("RGB", (8, 8), color=(255, 0, 0)).save(red_path)
+    Image.new("RGB", (8, 8), color=(0, 0, 255)).save(blue_path)
+    assert (
+        main(
+            ["--index", str(tmp_path), "--index-path", str(database_path)],
+            embedding_factory=ColorCliEmbedding,
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    terminal_stdout = TerminalStringIO()
+    monkeypatch.setattr(sys, "stdout", terminal_stdout)
+    exit_code = main(
+        ["red", "--index-path", str(database_path)],
+        embedding_factory=ColorCliEmbedding,
+    )
+
+    rendered = terminal_stdout.getvalue()
+    assert exit_code == 0
+    assert "\x1b[" in rendered
+    assert "[32m" in rendered or ";32m" in rendered
+    assert "[31m" in rendered or ";31m" in rendered
