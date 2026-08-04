@@ -36,6 +36,11 @@ Run the test suite with the test dependency group:
 uv run --group test python -m pytest
 ```
 
+## Benchmarks
+
+See the [benchmark guide](benchmarks/README.md) for repeatable CLIP embedding
+and Qdrant storage workloads.
+
 ## Index
 
 Index the supported files under a directory:
