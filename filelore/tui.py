@@ -7,8 +7,9 @@ from time import perf_counter
 
 from textual import work
 from textual.app import App, ComposeResult
-from textual.containers import Vertical, VerticalScroll
-from textual.widgets import Footer, Header, Input, Static
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
+from textual.widgets import Footer, Header, Input, Select, Static
 from textual.worker import get_current_worker
 
 from filelore.cli_display import search_results_renderable
@@ -25,6 +26,7 @@ from filelore.search_query import ParsedSearchQuery, parse_search_query
 class SearchResponse:
     parsed_query: ParsedSearchQuery
     results: tuple[FileSearchResult, ...]
+    limit: int
     embedding_ms: float
     fetch_ms: float
     total_ms: float
@@ -58,20 +60,86 @@ class SearchSession:
         return SearchResponse(
             parsed_query=parsed_query,
             results=results,
+            limit=limit,
             embedding_ms=embedding_ms,
             fetch_ms=fetch_ms,
             total_ms=(perf_counter() - total_started) * 1000,
         )
 
 
+class QueryHelpScreen(ModalScreen[None]):
+    """Compact reference for interactive query syntax."""
+
+    BINDINGS = [
+        ("escape", "dismiss", "Close"),
+        ("f1", "dismiss", "Close"),
+    ]
+    CSS = """
+    QueryHelpScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+
+    #help-dialog {
+        width: 90%;
+        max-width: 76;
+        height: auto;
+        max-height: 90%;
+        padding: 1 2;
+        border: round $accent;
+        background: $panel;
+    }
+
+    #help-title {
+        height: auto;
+        margin-bottom: 1;
+        color: $accent;
+        text-style: bold;
+        content-align: center middle;
+    }
+
+    #help-content {
+        height: auto;
+    }
+
+    #help-close {
+        height: auto;
+        margin-top: 1;
+        color: $text-muted;
+        content-align: center middle;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="help-dialog"):
+            yield Static("Query help", id="help-title")
+            yield Static(
+                "Write a natural description, then add optional key:value "
+                "filters. Quote values that contain spaces.\n\n"
+                "name:holiday       File name contains text\n"
+                "format:png         File format\n"
+                "min-res:1280x720   Minimum image resolution\n"
+                "max-res:3840x2160  Maximum image resolution\n"
+                "after:2025         Modified on or after a date\n"
+                "before:2026        Modified before a date\n\n"
+                "Dates accept YYYY, YYYY-MM, YYYY-MM-DD, or an ISO "
+                "datetime.\n"
+                "Example: cat on a balcony format:jpg after:2025",
+                id="help-content",
+            )
+            yield Static("Press F1 or Esc to close", id="help-close")
+
+
 class FileLoreSearchApp(App[None]):
     """Keyboard-first Textual interface that searches only on Enter."""
 
     TITLE = "FileLore"
-    SUB_TITLE = "Interactive semantic image search"
+    SUB_TITLE = "Interactive semantic file search"
+    LIMIT_PRESETS = (5, 10, 20, 50, 100)
     BINDINGS = [
         ("ctrl+q", "quit", "Quit"),
         ("ctrl+l", "clear_search", "Clear"),
+        ("f1", "query_help", "Help"),
         ("escape", "focus_search", "Search"),
     ]
     CSS = """
@@ -84,31 +152,42 @@ class FileLoreSearchApp(App[None]):
         padding: 1 2;
     }
 
-    #intro {
-        color: $text-muted;
-        height: auto;
+    #search-row {
+        height: 3;
         margin-bottom: 1;
     }
 
     #query {
-        width: 100%;
+        width: 1fr;
+        height: 3;
         border: tall $accent;
-        margin-bottom: 1;
     }
 
-    #filter-help, #active-filters {
+    #limit-label {
+        width: 7;
+        height: 3;
+        margin-left: 1;
+        content-align: right middle;
+        color: $text-muted;
+    }
+
+    #limit {
+        width: 14;
+        height: 3;
+        margin-left: 1;
+    }
+
+    #active-filters {
         color: $text-muted;
         height: auto;
     }
 
     #active-filters {
         color: $accent;
-        margin-top: 1;
     }
 
     #status {
         height: auto;
-        margin: 1 0;
         color: $success;
     }
 
@@ -135,28 +214,26 @@ class FileLoreSearchApp(App[None]):
     def __init__(self, session: SearchSession, *, limit: int) -> None:
         super().__init__()
         self.session = session
-        self.limit = limit
+        self.initial_limit = limit
         self._searching = False
 
     def compose(self) -> ComposeResult:
         yield Header()
         with Vertical(id="body"):
-            yield Static(
-                "The model is ready. Enter a semantic query and press Enter.",
-                id="intro",
-            )
-            yield Input(
-                placeholder=(
-                    "cat format:jpg min-res:1280x720 after:2025 before:2026"
-                ),
-                id="query",
-            )
-            yield Static(
-                "Filters: name · format · min-res · max-res · after · before",
-                id="filter-help",
-            )
+            with Horizontal(id="search-row"):
+                yield Input(
+                    placeholder="Describe a file, then press Enter to search…",
+                    id="query",
+                )
+                yield Static("Limit", id="limit-label")
+                yield Select[int](
+                    self._limit_options(),
+                    value=self.initial_limit,
+                    allow_blank=False,
+                    id="limit",
+                )
             yield Static("", id="active-filters")
-            yield Static("Ready", id="status")
+            yield Static("", id="status")
             with VerticalScroll(id="results-scroll"):
                 yield Static(
                     "Search results will appear here.",
@@ -179,14 +256,23 @@ class FileLoreSearchApp(App[None]):
         self._show_filters(parsed_query)
         self._searching = True
         event.input.disabled = True
+        limit_select = self.query_one("#limit", Select)
+        limit_select.disabled = True
+        selected_limit = limit_select.value
+        if not isinstance(selected_limit, int):
+            selected_limit = self.initial_limit
         self._set_status("Searching…", "searching")
-        self.execute_search(parsed_query)
+        self.execute_search(parsed_query, selected_limit)
 
     @work(exclusive=True, thread=True, group="search", exit_on_error=False)
-    def execute_search(self, parsed_query: ParsedSearchQuery) -> None:
+    def execute_search(
+        self,
+        parsed_query: ParsedSearchQuery,
+        limit: int,
+    ) -> None:
         worker = get_current_worker()
         try:
-            response = self.session.search(parsed_query, self.limit)
+            response = self.session.search(parsed_query, limit)
         except Exception as error:
             if not worker.is_cancelled:
                 self.call_from_thread(
@@ -202,16 +288,16 @@ class FileLoreSearchApp(App[None]):
             search_results_renderable(
                 response.results,
                 query=response.parsed_query.semantic_query,
-                limit=self.limit,
-                timings=(
-                    ("embedding", _format_duration(response.embedding_ms)),
-                    ("search", _format_duration(response.fetch_ms)),
-                    ("total", _format_duration(response.total_ms)),
-                ),
+                limit=response.limit,
+                timings=(),
+                show_footer=False,
             )
         )
         result_label = "result" if len(response.results) == 1 else "results"
-        self._set_status(f"Found {len(response.results)} {result_label}")
+        self._set_status(
+            f"Found {len(response.results)} {result_label} in "
+            f"{_format_duration(response.total_ms)}"
+        )
         self._finish_search()
 
     def _show_filters(self, parsed_query: ParsedSearchQuery) -> None:
@@ -235,6 +321,7 @@ class FileLoreSearchApp(App[None]):
         self._searching = False
         query = self.query_one("#query", Input)
         query.disabled = False
+        self.query_one("#limit", Select).disabled = False
         query.focus()
 
     def _set_status(self, message: str, class_name: str | None = None) -> None:
@@ -249,11 +336,18 @@ class FileLoreSearchApp(App[None]):
         self.query_one("#results", Static).update(
             "Search results will appear here."
         )
-        self._set_status("Ready")
+        self._set_status("")
         query.focus()
 
     def action_focus_search(self) -> None:
         self.query_one("#query", Input).focus()
+
+    def action_query_help(self) -> None:
+        self.push_screen(QueryHelpScreen())
+
+    def _limit_options(self) -> tuple[tuple[str, int], ...]:
+        limits = sorted({*self.LIMIT_PRESETS, self.initial_limit})
+        return tuple((str(limit), limit) for limit in limits)
 
 
 def run_interactive_search(

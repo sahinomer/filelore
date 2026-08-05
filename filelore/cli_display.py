@@ -151,6 +151,7 @@ def search_results_renderable(
     query: str,
     limit: int,
     timings: Sequence[tuple[str, str]],
+    show_footer: bool = True,
 ) -> Group:
     """Build a Rich result group shared by CLI and full-screen search."""
     renderables: list[RenderableType] = []
@@ -184,24 +185,26 @@ def search_results_renderable(
     else:
         renderables.append(Text("No semantic matches found.", style="dim"))
 
-    renderables.append(Rule(style="dim"))
-    result_label = "result" if len(results) == 1 else "results"
-    summary = Text()
-    summary.append(f"{len(results)} {result_label}", style="bold")
-    summary.append(f"  •  limit {limit}", style="dim")
-    if results:
-        summary.append("  •  relative match scale", style="dim")
-    renderables.append(summary)
+    if show_footer:
+        renderables.append(Rule(style="dim"))
+        result_label = "result" if len(results) == 1 else "results"
+        summary = Text()
+        summary.append(f"{len(results)} {result_label}", style="bold")
+        summary.append(f"  •  limit {limit}", style="dim")
+        if results:
+            summary.append("  •  relative match scale", style="dim")
+        renderables.append(summary)
 
-    timing_text = Text("Timing  ", style="bold dim")
-    for index, (label, duration) in enumerate(timings):
-        if index == 2:
-            timing_text.append("\n        ")
-        elif index:
-            timing_text.append("  •  ", style="dim")
-        timing_text.append(f"{label} ", style="dim")
-        timing_text.append(duration)
-    renderables.append(timing_text)
+        if timings:
+            timing_text = Text("Timing  ", style="bold dim")
+            for index, (label, duration) in enumerate(timings):
+                if index == 2:
+                    timing_text.append("\n        ")
+                elif index:
+                    timing_text.append("  •  ", style="dim")
+                timing_text.append(f"{label} ", style="dim")
+                timing_text.append(duration)
+            renderables.append(timing_text)
     return Group(*renderables)
 
 
