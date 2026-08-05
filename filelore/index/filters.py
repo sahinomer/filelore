@@ -80,7 +80,7 @@ def file_metadata_filter(query: FileMetadataQuery) -> MetadataFilter | None:
             MetadataCondition(
                 "modified_at",
                 query.modified_before,
-                operator=ConditionOperator.LESS_THAN_OR_EQUAL,
+                operator=ConditionOperator.LESS_THAN,
             )
         )
     return MetadataFilter(all_of=tuple(conditions)) if conditions else None

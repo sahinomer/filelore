@@ -10,6 +10,7 @@ from PIL import Image
 
 from filelore.cli import (
     DEFAULT_INDEX_PATH,
+    DEFAULT_RESULT_LIMIT,
     _format_duration,
     build_argument_parser,
     main,
@@ -91,6 +92,12 @@ def test_cli_accepts_qdrant_url_environment_override(
     args = build_argument_parser().parse_args([])
 
     assert args.qdrant_url == "http://qdrant.test:6333"
+
+
+def test_cli_accepts_the_short_interactive_flag() -> None:
+    args = build_argument_parser().parse_args(["-i"])
+
+    assert args.interactive is True
 
 
 def test_cli_parses_semantic_query_and_optional_search_filters() -> None:
@@ -279,6 +286,56 @@ def test_cli_requires_a_query_when_not_indexing(
     captured = capsys.readouterr()
     assert exit_code == 2
     assert "Search query is required unless --index is used" in captured.err
+
+
+def test_cli_rejects_explicit_interactive_search_without_a_terminal(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = main(["-i"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "requires an interactive terminal" in captured.err
+
+
+def test_cli_without_arguments_opens_interactive_search_on_a_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    terminal_stdin = TerminalStringIO()
+    terminal_stdout = TerminalStringIO()
+    monkeypatch.setattr(sys, "stdin", terminal_stdin)
+    monkeypatch.setattr(sys, "stdout", terminal_stdout)
+    monkeypatch.setattr("filelore.cli.DEFAULT_INDEX_PATH", tmp_path / "index")
+    factory_calls: list[ColorCliEmbedding] = []
+    runner_calls: list[tuple[ColorCliEmbedding, int]] = []
+
+    def embedding_factory() -> ColorCliEmbedding:
+        embedding = ColorCliEmbedding()
+        factory_calls.append(embedding)
+        return embedding
+
+    def interactive_runner(
+        file_index: object,
+        embedding: ImageEmbedding,
+        limit: int,
+    ) -> int:
+        assert file_index is not None
+        assert isinstance(embedding, ColorCliEmbedding)
+        runner_calls.append((embedding, limit))
+        embedding.predict_text("red")
+        embedding.predict_text("blue")
+        return 0
+
+    exit_code = main(
+        [],
+        embedding_factory=embedding_factory,
+        interactive_runner=interactive_runner,  # type: ignore[arg-type]
+    )
+
+    assert exit_code == 0
+    assert len(factory_calls) == 1
+    assert runner_calls == [(factory_calls[0], DEFAULT_RESULT_LIMIT)]
 
 
 def test_cli_rejects_a_search_query_with_indexing(

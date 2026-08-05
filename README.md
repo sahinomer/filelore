@@ -55,6 +55,28 @@ storage and indexing options.
 
 ## Search
 
+Open the full-screen search interface by running FileLore without arguments:
+
+```sh
+uv run python -m filelore
+```
+
+`-i` / `--interactive` is the explicit equivalent. FileLore initializes the
+embedding model once, then searches only when Enter is pressed. Interactive
+queries may combine semantic text with the metadata currently stored in the
+index:
+
+```text
+cat name:holiday format:jpg min-res:1280x720 after:2025 before:2026
+```
+
+Available filters are `name`, `format`, `min-res`, `max-res`, `after`, and
+`before`. Date boundaries accept `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or a full ISO
+datetime. `after` is inclusive and `before` is exclusive, so
+`after:2025 before:2026` selects files last modified during 2025.
+
+The existing one-shot interface remains available.
+
 Search the index with a natural-language description:
 
 ```sh

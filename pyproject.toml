@@ -8,6 +8,7 @@ dependencies = [
     "Pillow>=10,<13",
     "qdrant-client>=1.18,<2",
     "rich>=14,<15",
+    "textual>=8.2,<9",
 ]
 
 [project.optional-dependencies]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from datetime import date, datetime, time
 from pathlib import Path
 from time import perf_counter
@@ -25,6 +26,7 @@ from filelore.storage import (
 
 
 EmbeddingFactory = Callable[[], ImageEmbedding]
+InteractiveRunner = Callable[[FileIndexRepository, ImageEmbedding, int], int]
 DEFAULT_INDEX_PATH = Path.home() / ".filelore" / "qdrant"
 DEFAULT_BATCH_SIZE = 100
 DEFAULT_RESULT_LIMIT = 50
@@ -43,13 +45,22 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "query",
         nargs="?",
         metavar="QUERY",
-        help="semantic search query (required unless --index is used)",
+        help=(
+            "semantic search query (omit in a terminal to open interactive "
+            "search)"
+        ),
     )
     parser.add_argument(
         "--target",
         choices=("image",),
         default="image",
         help="embedding target (default: %(default)s)",
+    )
+    parser.add_argument(
+        "-i",
+        "--interactive",
+        action="store_true",
+        help="open the persistent full-screen search interface",
     )
 
     search_options = parser.add_argument_group("search options")
@@ -139,16 +150,58 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     embedding_factory: EmbeddingFactory | None = None,
+    interactive_runner: InteractiveRunner | None = None,
 ) -> int:
-    args = build_argument_parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = build_argument_parser().parse_args(raw_argv)
     display = CliDisplay()
     selected_embedding_factory = _embedding_factory_for_target(
         args.target,
         override=embedding_factory,
     )
     semantic_query = (args.query or "").strip()
+    interactive_terminal = _is_interactive_terminal()
+    interactive_mode = args.interactive or (
+        not raw_argv and interactive_terminal
+    )
 
-    if args.index_directory is not None:
+    if interactive_mode:
+        if args.query is not None or args.index_directory is not None:
+            display.print_error(
+                "Interactive search cannot be combined with a query or --index"
+            )
+            return 2
+        if not interactive_terminal:
+            display.print_error(
+                "Interactive search requires an interactive terminal"
+            )
+            return 2
+        if any(
+            value is not None
+            for value in (
+                args.name_contains,
+                args.file_format,
+                args.min_resolution,
+                args.max_resolution,
+                args.modified_after,
+                args.modified_before,
+            )
+        ):
+            display.print_error(
+                "Enter search filters inside the interactive search interface"
+            )
+            return 2
+        if args.no_recursive or args.batch_size is not None:
+            display.print_error("Index options require --index")
+            return 2
+        result_limit = (
+            args.limit if args.limit is not None else DEFAULT_RESULT_LIMIT
+        )
+        if result_limit < 1:
+            display.print_error("Search limit must be positive")
+            return 2
+        metadata_query = None
+    elif args.index_directory is not None:
         if args.query is not None:
             display.print_error("Search query cannot be combined with --index")
             return 2
@@ -230,6 +283,11 @@ def main(
                     display=display,
                 )
             file_index = FileIndexRepository(database)
+            if interactive_mode:
+                with display.status("Initializing image model…"):
+                    embedding = selected_embedding_factory()
+                runner = interactive_runner or _run_interactive_search
+                return runner(file_index, embedding, result_limit)
             assert metadata_query is not None
             return _search(
                 file_index,
@@ -257,6 +315,23 @@ def _embedding_factory_for_target(
     if target == "image":
         return override or ClipImageEmbedding
     raise ValueError(f"Unsupported embedding target: {target}")
+
+
+def _is_interactive_terminal() -> bool:
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _run_interactive_search(
+    file_index: FileIndexRepository,
+    embedding: ImageEmbedding,
+    limit: int,
+) -> int:
+    from filelore.tui import run_interactive_search
+
+    return run_interactive_search(file_index, embedding, limit)
 
 
 def _index_images(

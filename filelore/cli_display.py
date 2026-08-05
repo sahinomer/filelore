@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator, Sequence, TextIO
 
-from rich.console import Console
+from rich.console import Console, Group, RenderableType
 from rich.filesize import decimal
 from rich.progress import (
     BarColumn,
@@ -135,54 +135,74 @@ class CliDisplay:
         timings: Sequence[tuple[str, str]],
     ) -> None:
         """Render readable, terminal-aware semantic search results."""
-        title = Text("Search results for ", style="bold")
-        title.append(f'"{query}"', style="bold cyan")
-        self._output_console.print(Rule(title, style="cyan"))
+        self._output_console.print(
+            search_results_renderable(
+                results,
+                query=query,
+                limit=limit,
+                timings=timings,
+            )
+        )
 
-        if results:
-            table = Table.grid(expand=True, padding=(0, 1))
-            table.add_column(width=4, justify="right", no_wrap=True)
-            table.add_column(ratio=1, overflow="fold")
-            table.add_column(width=16, justify="right", no_wrap=True)
 
-            relative_scores = _relative_scores(results)
-            for rank, (result, relative_score) in enumerate(
-                zip(results, relative_scores),
-                start=1,
-            ):
-                path = result.file.path
-                table.add_row(
-                    Text(f"{rank}.", style="bold cyan"),
-                    _linked_filename(path),
-                    _match_text(relative_score),
-                )
-                table.add_row("", _directory_text(path.parent), "")
-                table.add_row("", _details_text(result.file.metadata), "")
-                table.add_row("", _modified_text(result.file.metadata), "")
-                if rank < len(results):
-                    table.add_row("", "", "")
-            self._output_console.print(table)
-        else:
-            self._output_console.print("[dim]No semantic matches found.[/dim]")
+def search_results_renderable(
+    results: Sequence[FileSearchResult],
+    *,
+    query: str,
+    limit: int,
+    timings: Sequence[tuple[str, str]],
+) -> Group:
+    """Build a Rich result group shared by CLI and full-screen search."""
+    renderables: list[RenderableType] = []
+    title = Text("Search results for ", style="bold")
+    title.append(f'"{query}"', style="bold cyan")
+    renderables.append(Rule(title, style="cyan"))
 
-        self._output_console.print(Rule(style="dim"))
-        result_label = "result" if len(results) == 1 else "results"
-        summary = Text()
-        summary.append(f"{len(results)} {result_label}", style="bold")
-        summary.append(f"  •  limit {limit}", style="dim")
-        if results:
-            summary.append("  •  relative match scale", style="dim")
-        self._output_console.print(summary)
+    if results:
+        table = Table.grid(expand=True, padding=(0, 1))
+        table.add_column(width=4, justify="right", no_wrap=True)
+        table.add_column(ratio=1, overflow="fold")
+        table.add_column(width=16, justify="right", no_wrap=True)
 
-        timing_text = Text("Timing  ", style="bold dim")
-        for index, (label, duration) in enumerate(timings):
-            if index == 2:
-                timing_text.append("\n        ")
-            elif index:
-                timing_text.append("  •  ", style="dim")
-            timing_text.append(f"{label} ", style="dim")
-            timing_text.append(duration)
-        self._output_console.print(timing_text)
+        relative_scores = _relative_scores(results)
+        for rank, (result, relative_score) in enumerate(
+            zip(results, relative_scores),
+            start=1,
+        ):
+            path = result.file.path
+            table.add_row(
+                Text(f"{rank}.", style="bold cyan"),
+                _linked_filename(path),
+                _match_text(relative_score),
+            )
+            table.add_row("", _directory_text(path.parent), "")
+            table.add_row("", _details_text(result.file.metadata), "")
+            table.add_row("", _modified_text(result.file.metadata), "")
+            if rank < len(results):
+                table.add_row("", "", "")
+        renderables.append(table)
+    else:
+        renderables.append(Text("No semantic matches found.", style="dim"))
+
+    renderables.append(Rule(style="dim"))
+    result_label = "result" if len(results) == 1 else "results"
+    summary = Text()
+    summary.append(f"{len(results)} {result_label}", style="bold")
+    summary.append(f"  •  limit {limit}", style="dim")
+    if results:
+        summary.append("  •  relative match scale", style="dim")
+    renderables.append(summary)
+
+    timing_text = Text("Timing  ", style="bold dim")
+    for index, (label, duration) in enumerate(timings):
+        if index == 2:
+            timing_text.append("\n        ")
+        elif index:
+            timing_text.append("  •  ", style="dim")
+        timing_text.append(f"{label} ", style="dim")
+        timing_text.append(duration)
+    renderables.append(timing_text)
+    return Group(*renderables)
 
 
 def _relative_scores(results: Sequence[FileSearchResult]) -> tuple[float, ...]:
