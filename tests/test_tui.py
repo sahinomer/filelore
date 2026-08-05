@@ -85,6 +85,31 @@ def search_result(path: Path) -> FileSearchResult:
 
 
 @pytest.mark.anyio
+async def test_tui_uses_file_search_layout_and_limit_options(
+    tmp_path: Path,
+) -> None:
+    embedding = RecordingTextEmbedding()
+    repository = RecordingSearchRepository(search_result(tmp_path / "cat.png"))
+    app = FileLoreSearchApp(
+        SearchSession(repository, embedding),  # type: ignore[arg-type]
+        limit=25,
+    )
+
+    async with app.run_test(size=(100, 32)):
+        assert app.SUB_TITLE == "Interactive semantic file search"
+        assert len(app.query("#query-help")) == 0
+        assert len(app.query("#intro")) == 0
+        assert app._limit_options() == (
+            ("5", 5),
+            ("10", 10),
+            ("20", 20),
+            ("25", 25),
+            ("50", 50),
+            ("100", 100),
+        )
+
+
+@pytest.mark.anyio
 async def test_tui_searches_only_after_enter_and_reuses_the_session(
     tmp_path: Path,
 ) -> None:
@@ -97,17 +122,6 @@ async def test_tui_searches_only_after_enter_and_reuses_the_session(
 
     async with app.run_test(size=(100, 32)) as pilot:
         query = app.query_one("#query", Input)
-        assert app.SUB_TITLE == "Interactive semantic file search"
-        assert len(app.query("#query-help")) == 0
-        assert len(app.query("#intro")) == 0
-        assert app._limit_options() == (
-            ("5", 5),
-            ("10", 10),
-            ("20", 20),
-            ("25", 25),
-            ("50", 50),
-            ("100", 100),
-        )
 
         limit_select = app.query_one("#limit", Select)
         limit_select.value = 10

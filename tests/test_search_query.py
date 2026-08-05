@@ -39,20 +39,24 @@ def test_interactive_query_parses_semantic_text_and_current_metadata_filters() -
 
 
 @pytest.mark.parametrize(
-    ("filter_text", "expected"),
+    ("filter_text", "metadata_field", "expected"),
     [
-        ("after:2025", datetime(2025, 1, 1).astimezone()),
-        ("after:2024-02", datetime(2024, 2, 1).astimezone()),
-        ("after:2024-05-06", datetime(2024, 5, 6).astimezone()),
+        ("after:2025", "modified_after", datetime(2025, 1, 1).astimezone()),
+        ("after:2024-02", "modified_after", datetime(2024, 2, 1).astimezone()),
+        ("after:2024-05-06", "modified_after", datetime(2024, 5, 6).astimezone()),
+        ("before:2025", "modified_before", datetime(2025, 1, 1).astimezone()),
+        ("before:2024-02", "modified_before", datetime(2024, 2, 1).astimezone()),
+        ("before:2024-05-06", "modified_before", datetime(2024, 5, 6).astimezone()),
     ],
 )
 def test_interactive_query_accepts_partial_iso_dates(
     filter_text: str,
+    metadata_field: str,
     expected: datetime,
 ) -> None:
     parsed = parse_search_query(f"cat {filter_text}")
 
-    assert parsed.metadata_query.modified_after == expected
+    assert getattr(parsed.metadata_query, metadata_field) == expected
 
 
 def test_before_filter_uses_an_exclusive_partial_date_boundary() -> None:

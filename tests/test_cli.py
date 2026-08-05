@@ -154,7 +154,7 @@ def test_cli_links_search_result_directories(tmp_path: Path) -> None:
     )
 
 
-def test_cli_indexing_shows_progress_without_printing_image_metadata(
+def test_cli_indexing_emits_only_expected_progress_feedback(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -180,14 +180,13 @@ def test_cli_indexing_shows_progress_without_printing_image_metadata(
     captured = capsys.readouterr()
     assert exit_code == 0
     assert captured.out == ""
-    assert "Initializing image model" in captured.err
-    assert "Discovering images" in captured.err
-    assert "Indexing images" in captured.err
-    assert captured.err.count("Indexing images") == 1
-    assert "2/2" in captured.err
-    assert "100%" in captured.err
-    assert str(first.resolve()) not in captured.err
-    assert str(second.resolve()) not in captured.err
+    stderr_lines = captured.err.splitlines()
+    assert len(stderr_lines) == 3
+    assert stderr_lines[0].startswith("Initializing image model")
+    assert stderr_lines[1].startswith("Discovering images")
+    assert stderr_lines[2].startswith("Indexing images")
+    assert "2/2" in stderr_lines[2]
+    assert "100%" in stderr_lines[2]
 
 
 def test_cli_failed_files_still_complete_progress(
@@ -513,7 +512,7 @@ def test_cli_shows_search_model_initialization_on_stderr(
     assert "Timing" in captured.out
 
 
-def test_cli_search_uses_score_colors_and_file_hyperlinks(
+def test_cli_search_uses_score_colors_in_terminal(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
