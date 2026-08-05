@@ -300,10 +300,13 @@ def _process_and_store(
     display: CliDisplay,
 ) -> bool:
     batch = processor.process_batch(paths)
-    with display.suspend():
-        for failure in batch.failures:
-            display.print_error(f"Could not index {failure.path}: {failure.error}")
-        _store(file_index, batch.files)
+    if batch.failures:
+        with display.suspend():
+            for failure in batch.failures:
+                display.print_error(
+                    f"Could not index {failure.path}: {failure.error}"
+                )
+    _store(file_index, batch.files)
     return bool(batch.failures)
 
 

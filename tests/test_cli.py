@@ -164,6 +164,8 @@ def test_cli_indexing_shows_progress_without_printing_image_metadata(
             str(tmp_path),
             "--index-path",
             str(tmp_path / "qdrant-index"),
+            "--batch-size",
+            "1",
         ],
         embedding_factory=ColorCliEmbedding,
     )
@@ -174,6 +176,7 @@ def test_cli_indexing_shows_progress_without_printing_image_metadata(
     assert "Initializing image model" in captured.err
     assert "Discovering images" in captured.err
     assert "Indexing images" in captured.err
+    assert captured.err.count("Indexing images") == 1
     assert "2/2" in captured.err
     assert "100%" in captured.err
     assert str(first.resolve()) not in captured.err
