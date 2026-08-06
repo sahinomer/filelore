@@ -18,3 +18,6 @@ class AudioInput:
 
 class AudioEmbedding(TextEmbedding[AudioInput]):
     """Embed decoded audio and text into the same comparable vector space."""
+
+    sampling_rate: int
+    max_length_seconds: float

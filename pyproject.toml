@@ -6,9 +6,12 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "mutagen>=1.47,<2",
+    "numpy>=2,<3",
     "Pillow>=10,<13",
     "qdrant-client>=1.18,<2",
     "rich>=14,<15",
+    "soundfile>=0.13,<1",
+    "soxr>=1,<2",
     "textual>=8.2,<9",
 ]
 
