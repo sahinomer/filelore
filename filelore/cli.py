@@ -39,10 +39,18 @@ from filelore.storage import QdrantVectorDatabase, VectorDatabase
 EmbeddingFactory = Callable[[], TextEmbedding[Any]]
 ImageEmbeddingFactory = Callable[[], ImageEmbedding]
 AudioEmbeddingFactory = Callable[[], AudioEmbedding]
-InteractiveRunner = Callable[[FileIndexRepository, ImageEmbedding, int], int]
+InteractiveRunner = Callable[
+    [
+        FileIndexRepository,
+        Mapping[str, IndexHandler],
+        Sequence[str],
+        int,
+    ],
+    int,
+]
 DEFAULT_INDEX_PATH = Path.home() / ".filelore" / "qdrant"
 DEFAULT_BATCH_SIZE = 100
-DEFAULT_RESULT_LIMIT = 50
+DEFAULT_RESULT_LIMIT = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,11 +259,6 @@ def main(
                 "Interactive search requires an interactive terminal"
             )
             return 2
-        if args.target == "audio":
-            display.print_error(
-                "Interactive audio search is not available yet; use a CLI query"
-            )
-            return 2
         if any(
             value is not None
             for value in (
@@ -379,15 +382,18 @@ def main(
                 )
             file_index = FileIndexRepository(database)
             if interactive_mode:
-                with display.status("Initializing image model…"):
-                    embedding = embedding_factories["image"]()
-                if not isinstance(embedding, ImageEmbedding):
-                    embedding.close()
-                    raise TypeError(
-                        "Interactive search requires an image embedding"
-                    )
+                allowed_targets = (
+                    (args.target,)
+                    if args.target is not None
+                    else tuple(handlers_by_type)
+                )
                 runner = interactive_runner or _run_interactive_search
-                return runner(file_index, embedding, result_limit)
+                return runner(
+                    file_index,
+                    handlers_by_type,
+                    allowed_targets,
+                    result_limit,
+                )
             assert metadata_query is not None
             assert search_target is not None
             return _search(
@@ -488,12 +494,18 @@ def _can_prompt() -> bool:
 
 def _run_interactive_search(
     file_index: FileIndexRepository,
-    embedding: ImageEmbedding,
+    handlers: Mapping[str, IndexHandler],
+    allowed_targets: Sequence[str],
     limit: int,
 ) -> int:
     from filelore.tui import run_interactive_search
 
-    return run_interactive_search(file_index, embedding, limit)
+    return run_interactive_search(
+        file_index,
+        handlers,
+        allowed_targets,
+        limit,
+    )
 
 
 def _index_handlers(

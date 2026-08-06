@@ -225,24 +225,12 @@ def search_results_renderable(
             zip(results, relative_scores),
             start=1,
         ):
-            path = result.file.path
-            table.add_row(
-                Text(f"{rank}.", style="bold cyan"),
-                _linked_filename(path),
-                _match_text(relative_score),
+            _add_search_result_rows(
+                table,
+                result,
+                rank=rank,
+                relative_score=relative_score,
             )
-            table.add_row("", _directory_text(path.parent), "")
-            table.add_row(
-                "",
-                _details_text(
-                    result.file.metadata,
-                    file_type=result.file.file_type,
-                ),
-                "",
-            )
-            if result.segment is not None:
-                table.add_row("", _segment_text(result.segment), "")
-            table.add_row("", _modified_text(result.file.metadata), "")
             if rank < len(results):
                 table.add_row("", "", "")
         renderables.append(table)
@@ -270,6 +258,53 @@ def search_results_renderable(
                 timing_text.append(duration)
             renderables.append(timing_text)
     return Group(*renderables)
+
+
+def search_result_item_renderable(
+    result: FileSearchResult,
+    *,
+    rank: int,
+    relative_score: float,
+) -> Table:
+    """Build one reusable file-result table for interactive result cards."""
+    table = Table.grid(expand=True, padding=(0, 1))
+    table.add_column(width=4, justify="right", no_wrap=True)
+    table.add_column(ratio=1, overflow="fold")
+    table.add_column(width=16, justify="right", no_wrap=True)
+    _add_search_result_rows(
+        table,
+        result,
+        rank=rank,
+        relative_score=relative_score,
+    )
+    return table
+
+
+def _add_search_result_rows(
+    table: Table,
+    result: FileSearchResult,
+    *,
+    rank: int,
+    relative_score: float,
+) -> None:
+    path = result.file.path
+    table.add_row(
+        Text(f"{rank}.", style="bold cyan"),
+        _linked_filename(path),
+        _match_text(relative_score),
+    )
+    table.add_row("", _directory_text(path.parent), "")
+    table.add_row(
+        "",
+        _details_text(
+            result.file.metadata,
+            file_type=result.file.file_type,
+        ),
+        "",
+    )
+    if result.segment is not None:
+        table.add_row("", _segment_text(result.segment), "")
+    table.add_row("", _modified_text(result.file.metadata), "")
 
 
 def _relative_scores(results: Sequence[FileSearchResult]) -> tuple[float, ...]:

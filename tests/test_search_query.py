@@ -5,7 +5,7 @@ from datetime import datetime
 import pytest
 
 from filelore.index import FileMetadataQuery, file_metadata_filter
-from filelore.search_query import parse_search_query
+from filelore.search_query import parse_search_query, validate_search_target
 from filelore.storage import ConditionOperator
 
 
@@ -105,6 +105,37 @@ def test_audio_metadata_query_uses_exact_stream_and_strict_duration_filters() ->
     ]
 
 
+def test_interactive_query_parses_audio_filters() -> None:
+    parsed = parse_search_query(
+        "glass breaking sample-rate:48000 bitrate:192000 "
+        "longer-than:1.5 shorter-than:30"
+    )
+
+    assert parsed.metadata_query.sample_rate_hz == 48_000
+    assert parsed.metadata_query.bitrate_bps == 192_000
+    assert parsed.metadata_query.duration_longer_than == 1.5
+    assert parsed.metadata_query.duration_shorter_than == 30.0
+    validate_search_target(parsed, "audio")
+
+
+@pytest.mark.parametrize(
+    ("query", "target", "message"),
+    (
+        ("rain min-res:1280x720", "audio", "image target"),
+        ("cat sample-rate:48000", "image", "audio target"),
+        ("rain format:wav", "image", "is audio, not image"),
+        ("cat format:jpg", "audio", "is image, not audio"),
+    ),
+)
+def test_interactive_query_validates_filters_for_selected_target(
+    query: str,
+    target: str,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        validate_search_target(parse_search_query(query), target)
+
+
 @pytest.mark.parametrize(
     ("query", "message"),
     [
@@ -115,6 +146,16 @@ def test_audio_metadata_query_uses_exact_stream_and_strict_duration_filters() ->
         ("cat after:2025-13", "Invalid after date"),
         ("cat after:2026 before:2025", "after must be earlier"),
         ("cat format:png format:jpg", "may only be used once"),
+        ("rain sample-rate:0", "must be positive"),
+        ("rain bitrate:fast", "expected a positive integer"),
+        ("rain longer-than:-1", "must be non-negative"),
+        ("rain shorter-than:0", "must be positive"),
+        ("rain longer-than:nan", "must be non-negative"),
+        ("rain shorter-than:inf", "must be positive"),
+        (
+            "rain longer-than:30 shorter-than:10",
+            "longer-than must be less",
+        ),
     ],
 )
 def test_interactive_query_reports_clear_validation_errors(

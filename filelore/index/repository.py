@@ -348,7 +348,10 @@ class FileIndexRepository:
         )
         return tuple(
             FileSearchResult(
-                file=self._to_entry(result.record),
+                file=self._to_entry(
+                    result.record,
+                    entry_id=self._segment_parent_id(result.record),
+                ),
                 score=result.score,
                 segment=self._to_segment(result.record),
             )
@@ -401,7 +404,11 @@ class FileIndexRepository:
         return self.database.count(self.collection_name, metadata_filter)
 
     @staticmethod
-    def _to_entry(record: StoredRecord) -> FileIndexEntry:
+    def _to_entry(
+        record: StoredRecord,
+        *,
+        entry_id: str | None = None,
+    ) -> FileIndexEntry:
         metadata = record.payload.get("metadata")
         if not isinstance(metadata, dict):
             metadata = {}
@@ -409,13 +416,22 @@ class FileIndexRepository:
         if not isinstance(indexed_at, str):
             raise ValueError(f"Indexed record {record.id} has no indexed_at timestamp")
         return FileIndexEntry(
-            id=record.id,
+            id=entry_id or record.id,
             path=Path(str(record.payload["absolute_path"])),
             content_hash=str(record.payload["content_hash"]),
             file_type=str(record.payload["file_type"]),
             metadata=dict(metadata),
             indexed_at=datetime.fromisoformat(indexed_at),
         )
+
+    @staticmethod
+    def _segment_parent_id(record: StoredRecord) -> str:
+        parent_id = record.payload.get("parent_id")
+        if not isinstance(parent_id, str) or not parent_id:
+            raise ValueError(
+                f"Segment record {record.id} has no valid parent_id"
+            )
+        return parent_id
 
     @staticmethod
     def _to_segment(record: StoredRecord) -> FileSegmentMatch:

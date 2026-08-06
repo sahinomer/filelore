@@ -207,6 +207,10 @@ def test_file_indexer_processes_audio_and_stores_timed_child_points(
             audio_path.resolve(),
             audio_path.resolve(),
         ]
+        assert [result.file.id for result in results] == [
+            file_point_id(audio_path),
+            file_point_id(audio_path),
+        ]
         assert [result.segment.index for result in results if result.segment] == [
             0,
             1,

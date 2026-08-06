@@ -13,8 +13,8 @@ and retrieval under the user's control.
 - Store indexes locally or in a configured Qdrant service.
 
 The current implementation supports image and audio indexing, text-to-image
-search through the CLI and TUI, and raw text-to-audio chunk search through the
-CLI.
+and text-to-audio search through the CLI and TUI, raw audio chunk results in
+the CLI, and grouped expandable audio results in the TUI.
 
 ## Setup
 
@@ -79,19 +79,35 @@ Open the full-screen search interface by running FileLore without arguments:
 uv run python -m filelore
 ```
 
-`-i` / `--interactive` is the explicit equivalent. FileLore initializes the
-embedding model once, then searches only when Enter is pressed. Interactive
-queries may combine semantic text with the metadata currently stored in the
-index:
+`-i` / `--interactive` is the explicit equivalent. Select Images or Audio
+beside the search field. FileLore loads that target's model only when a search
+is submitted, retains it for later searches, and releases it before switching
+to the other target. Supplying `--target image` or `--target audio` when the
+TUI is launched constrains the selector to that target.
+
+Interactive queries may combine semantic text with the metadata currently
+stored in the index. Image queries support:
 
 ```text
 cat name:holiday format:jpg min-res:1280x720 after:2025 before:2026
 ```
 
-Available filters are `name`, `format`, `min-res`, `max-res`, `after`, and
-`before`. Date boundaries accept `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or a full ISO
-datetime. `after` is inclusive and `before` is exclusive, so
+Audio queries support `sample-rate`, `bitrate`, `longer-than`, and
+`shorter-than` instead of the resolution filters:
+
+```text
+glass breaking format:wav sample-rate:48000 longer-than:1 shorter-than:30
+```
+
+Both targets support `name`, `format`, `after`, and `before`. Press F1 for
+help tailored to the currently selected target. Date boundaries accept
+`YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or a full ISO datetime. `after` is inclusive
+and `before` is exclusive, so
 `after:2025 before:2026` selects files last modified during 2025.
+
+The default result limit is 20. Audio chunk matches are grouped by parent file
+in the TUI, and each file can be expanded to show its matching chunks ordered
+by similarity.
 
 The existing one-shot interface remains available.
 
@@ -127,7 +143,7 @@ uv run python -m filelore "glass breaking" \
 ## Areas of exploration
 
 - Text-document indexing and content search.
-- Grouped audio search results in the CLI and TUI.
+- Optional grouping or deduplication for raw CLI audio results.
 - Speech transcription and search.
 
 ## License

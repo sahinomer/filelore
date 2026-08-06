@@ -4,7 +4,7 @@ import sys
 import wave
 from io import StringIO
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import pytest
 from PIL import Image
@@ -23,7 +23,7 @@ from filelore.embedding import (
     EmbeddingVector,
     ImageEmbedding,
 )
-from filelore.index import FileIndexRepository
+from filelore.index import FileIndexRepository, IndexHandler
 from filelore.storage import QdrantVectorDatabase
 
 
@@ -618,11 +618,18 @@ def test_cli_smart_indexing_loads_models_sequentially(
         for line in capsys.readouterr().err.splitlines()
         if line.startswith("Indexing ")
     ]
-    assert [line.split("  ", 1)[0] for line in progress_lines] == [
+    progress_labels = [
         "Indexing image files",
         "Indexing audio files",
     ]
-    assert [line.index("-") for line in progress_lines] == [22, 22]
+    assert [line.split("  ", 1)[0] for line in progress_lines] == progress_labels
+    progress_content_starts = []
+    for line, label in zip(progress_lines, progress_labels):
+        remainder = line[len(label) :]
+        progress_content_starts.append(
+            len(label) + len(remainder) - len(remainder.lstrip())
+        )
+    assert progress_content_starts == [22, 22]
     with QdrantVectorDatabase(database_path) as database:
         repository = FileIndexRepository(database)
         assert repository.count() == 2
@@ -828,7 +835,7 @@ def test_cli_without_arguments_opens_interactive_search_on_a_terminal(
     monkeypatch.setattr(sys, "stdout", terminal_stdout)
     monkeypatch.setattr("filelore.cli.DEFAULT_INDEX_PATH", tmp_path / "index")
     factory_calls: list[ColorCliEmbedding] = []
-    runner_calls: list[tuple[ColorCliEmbedding, int]] = []
+    runner_calls: list[tuple[tuple[str, ...], tuple[str, ...], int]] = []
 
     def image_embedding_factory() -> ColorCliEmbedding:
         embedding = ColorCliEmbedding()
@@ -837,14 +844,15 @@ def test_cli_without_arguments_opens_interactive_search_on_a_terminal(
 
     def interactive_runner(
         file_index: object,
-        embedding: ImageEmbedding,
+        handlers: Mapping[str, IndexHandler],
+        allowed_targets: Sequence[str],
         limit: int,
     ) -> int:
         assert file_index is not None
-        assert isinstance(embedding, ColorCliEmbedding)
-        runner_calls.append((embedding, limit))
-        embedding.predict_text("red")
-        embedding.predict_text("blue")
+        assert factory_calls == []
+        runner_calls.append(
+            (tuple(handlers), tuple(allowed_targets), limit)
+        )
         return 0
 
     exit_code = main(
@@ -854,8 +862,55 @@ def test_cli_without_arguments_opens_interactive_search_on_a_terminal(
     )
 
     assert exit_code == 0
-    assert len(factory_calls) == 1
-    assert runner_calls == [(factory_calls[0], DEFAULT_RESULT_LIMIT)]
+    assert factory_calls == []
+    assert runner_calls == [
+        (("image", "audio"), ("image", "audio"), DEFAULT_RESULT_LIMIT)
+    ]
+
+
+def test_interactive_target_constrains_tui_without_loading_a_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    terminal_stdin = TerminalStringIO()
+    terminal_stdout = TerminalStringIO()
+    monkeypatch.setattr(sys, "stdin", terminal_stdin)
+    monkeypatch.setattr(sys, "stdout", terminal_stdout)
+    monkeypatch.setattr("filelore.cli.DEFAULT_INDEX_PATH", tmp_path / "index")
+    factory_calls: list[str] = []
+    runner_calls: list[tuple[str, ...]] = []
+
+    def image_factory() -> ColorCliEmbedding:
+        factory_calls.append("image")
+        return ColorCliEmbedding()
+
+    def audio_factory() -> AudioCliEmbedding:
+        factory_calls.append("audio")
+        return AudioCliEmbedding()
+
+    def interactive_runner(
+        file_index: object,
+        handlers: Mapping[str, IndexHandler],
+        allowed_targets: Sequence[str],
+        limit: int,
+    ) -> int:
+        assert file_index is not None
+        assert tuple(handlers) == ("image", "audio")
+        assert limit == DEFAULT_RESULT_LIMIT
+        assert factory_calls == []
+        runner_calls.append(tuple(allowed_targets))
+        return 0
+
+    exit_code = main(
+        ["-i", "--target", "audio"],
+        image_embedding_factory=image_factory,
+        audio_embedding_factory=audio_factory,
+        interactive_runner=interactive_runner,
+    )
+
+    assert exit_code == 0
+    assert factory_calls == []
+    assert runner_calls == [("audio",)]
 
 
 def test_cli_rejects_a_search_query_with_indexing(
