@@ -241,7 +241,7 @@ async def test_tui_uses_target_search_layout_and_limit_options(
     async with app.run_test(size=(100, 32)):
         assert app.SUB_TITLE == "Interactive semantic file search"
         assert app.query_one("#target", Select).disabled
-        assert app._target_options() == (("Images", "image"),)
+        assert app._target_options() == (("Image", "image"),)
         assert app._limit_options() == (
             ("5", 5),
             ("10", 10),

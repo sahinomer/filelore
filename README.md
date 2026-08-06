@@ -79,7 +79,7 @@ Open the full-screen search interface by running FileLore without arguments:
 uv run python -m filelore
 ```
 
-`-i` / `--interactive` is the explicit equivalent. Select Images or Audio
+`-i` / `--interactive` is the explicit equivalent. Select Image or Audio
 beside the search field. FileLore loads that target's model only when a search
 is submitted, retains it for later searches, and releases it before switching
 to the other target. Supplying `--target image` or `--target audio` when the

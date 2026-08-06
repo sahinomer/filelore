@@ -1007,7 +1007,8 @@ def test_cli_searches_with_optional_metadata_filters(
     assert matching.name in captured.out
     assert "Directory" in captured.out
     assert non_matching.name not in captured.out
-    assert "100% match" in captured.out
+    assert "Score " in captured.out
+    assert "% match" not in captured.out
     assert "PNG" in captured.out
     assert "12 × 8 px" in captured.out
     assert "RGB" in captured.out
@@ -1050,8 +1051,9 @@ def test_cli_indexes_embeddings_and_searches_by_semantic_description(
     captured = capsys.readouterr()
     assert exit_code == 0
     assert captured.out.index(red_path.name) < captured.out.index(blue_path.name)
-    assert "100% match" in captured.out
-    assert "0% match" in captured.out
+    assert "Score 1.000" in captured.out
+    assert "Score 0.000" in captured.out
+    assert "raw cosine similarity" in captured.out
     assert "2 results" in captured.out
     assert "Timing" in captured.out
 
@@ -1151,7 +1153,7 @@ def test_cli_shows_search_model_initialization_on_stderr(
     assert "Timing" in captured.out
 
 
-def test_cli_search_uses_score_colors_in_terminal(
+def test_cli_search_uses_neutral_score_color_in_terminal(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -1186,5 +1188,5 @@ def test_cli_search_uses_score_colors_in_terminal(
     rendered = terminal_stdout.getvalue()
     assert exit_code == 0
     assert "\x1b[" in rendered
-    assert "[32m" in rendered or ";32m" in rendered
-    assert "[31m" in rendered or ";31m" in rendered
+    assert "[36m" in rendered or ";36m" in rendered
+    assert "% match" not in rendered

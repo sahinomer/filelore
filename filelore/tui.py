@@ -270,19 +270,17 @@ class SearchResultCard(Vertical):
         entity: SearchResultEntity,
         *,
         rank: int,
-        relative_score: float,
     ) -> None:
         super().__init__(classes="result-card")
         self.entity = entity
         self.rank = rank
-        self.relative_score = relative_score
 
     def compose(self) -> ComposeResult:
         yield Static(
             search_result_item_renderable(
                 self.entity.result,
                 rank=self.rank,
-                relative_score=self.relative_score,
+                score=self.entity.result.score,
             ),
             classes="result-summary",
         )
@@ -503,20 +501,13 @@ class FileLoreSearchApp(App[None]):
         results = self.query_one("#results", Vertical)
         await results.remove_children()
         if response.results:
-            relative_scores = _relative_scores(
-                tuple(item.result.score for item in response.results)
-            )
             await results.mount(
                 *(
                     SearchResultCard(
                         entity,
                         rank=rank,
-                        relative_score=relative_score,
                     )
-                    for rank, (entity, relative_score) in enumerate(
-                        zip(response.results, relative_scores),
-                        start=1,
-                    )
+                    for rank, entity in enumerate(response.results, start=1)
                 )
             )
         else:
@@ -597,7 +588,7 @@ class FileLoreSearchApp(App[None]):
         return tuple((str(limit), limit) for limit in limits)
 
     def _target_options(self) -> tuple[tuple[str, str], ...]:
-        labels = {"image": "Images", "audio": "Audio"}
+        labels = {"image": "Image", "audio": "Audio"}
         return tuple(
             (labels.get(target, target.title()), target)
             for target in self.session.targets
@@ -688,17 +679,6 @@ def _chunk_matches_renderable(
             Text(f"{chunk.score:.3f}", style="cyan"),
         )
     return table
-
-
-def _relative_scores(scores: Sequence[float]) -> tuple[float, ...]:
-    if len(scores) < 2:
-        return tuple(1.0 for _ in scores)
-    lowest = min(scores)
-    highest = max(scores)
-    span = highest - lowest
-    if span <= 0:
-        return tuple(1.0 for _ in scores)
-    return tuple((score - lowest) / span for score in scores)
 
 
 def _timestamp_text(seconds: float) -> str:

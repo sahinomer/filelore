@@ -220,16 +220,12 @@ def search_results_renderable(
         table.add_column(ratio=1, overflow="fold")
         table.add_column(width=16, justify="right", no_wrap=True)
 
-        relative_scores = _relative_scores(results)
-        for rank, (result, relative_score) in enumerate(
-            zip(results, relative_scores),
-            start=1,
-        ):
+        for rank, result in enumerate(results, start=1):
             _add_search_result_rows(
                 table,
                 result,
                 rank=rank,
-                relative_score=relative_score,
+                score=result.score,
             )
             if rank < len(results):
                 table.add_row("", "", "")
@@ -244,7 +240,7 @@ def search_results_renderable(
         summary.append(f"{len(results)} {result_label}", style="bold")
         summary.append(f"  •  limit {limit}", style="dim")
         if results:
-            summary.append("  •  relative match scale", style="dim")
+            summary.append("  •  raw cosine similarity", style="dim")
         renderables.append(summary)
 
         if timings:
@@ -264,7 +260,7 @@ def search_result_item_renderable(
     result: FileSearchResult,
     *,
     rank: int,
-    relative_score: float,
+    score: float,
 ) -> Table:
     """Build one reusable file-result table for interactive result cards."""
     table = Table.grid(expand=True, padding=(0, 1))
@@ -275,7 +271,7 @@ def search_result_item_renderable(
         table,
         result,
         rank=rank,
-        relative_score=relative_score,
+        score=score,
     )
     return table
 
@@ -285,13 +281,13 @@ def _add_search_result_rows(
     result: FileSearchResult,
     *,
     rank: int,
-    relative_score: float,
+    score: float,
 ) -> None:
     path = result.file.path
     table.add_row(
         Text(f"{rank}.", style="bold cyan"),
         _linked_filename(path),
-        _match_text(relative_score),
+        _score_text(score),
     )
     table.add_row("", _directory_text(path.parent), "")
     table.add_row(
@@ -307,27 +303,8 @@ def _add_search_result_rows(
     table.add_row("", _modified_text(result.file.metadata), "")
 
 
-def _relative_scores(results: Sequence[FileSearchResult]) -> tuple[float, ...]:
-    scores = tuple(result.score for result in results)
-    if len(scores) < 2:
-        return tuple(1.0 for _ in scores)
-    lowest = min(scores)
-    highest = max(scores)
-    span = highest - lowest
-    if span <= 0:
-        return tuple(1.0 for _ in scores)
-    return tuple((score - lowest) / span for score in scores)
-
-
-def _match_text(relative_score: float) -> Text:
-    percentage = round(relative_score * 100)
-    if relative_score >= 0.67:
-        style = "bold green"
-    elif relative_score >= 0.34:
-        style = "bold yellow"
-    else:
-        style = "bold red"
-    return Text(f"● {percentage:>3}% match", style=style)
+def _score_text(score: float) -> Text:
+    return Text(f"Score {score:.3f}", style="bold cyan")
 
 
 def _linked_filename(path: Path) -> Text:
