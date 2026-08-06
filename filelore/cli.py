@@ -18,6 +18,7 @@ from filelore.embedding import (
     ClapAudioEmbedding,
     ClipImageEmbedding,
     ImageEmbedding,
+    TextEmbedding,
 )
 from filelore.index import (
     FileIndexRepository,
@@ -35,6 +36,7 @@ from filelore.storage import QdrantVectorDatabase, VectorDatabase
 
 EmbeddingFactory = Callable[[], ImageEmbedding]
 AudioEmbeddingFactory = Callable[[], AudioEmbedding]
+SearchEmbeddingFactory = Callable[[], TextEmbedding[Any]]
 InteractiveRunner = Callable[[FileIndexRepository, ImageEmbedding, int], int]
 DEFAULT_INDEX_PATH = Path.home() / ".filelore" / "qdrant"
 DEFAULT_BATCH_SIZE = 100
@@ -61,9 +63,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--target",
-        choices=("image",),
-        default="image",
-        help="embedding target (default: %(default)s)",
+        "--type",
+        dest="target",
+        choices=("image", "audio"),
+        help="search file type; required unless --format implies it",
     )
     parser.add_argument(
         "-i",
@@ -83,7 +86,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--format",
         dest="file_format",
         metavar="FORMAT",
-        help="only return files with this format, such as PNG or JPEG",
+        help="only return files with this format, such as PNG, JPEG, WAV, or MP3",
     )
     search_options.add_argument(
         "--min-resolution",
@@ -94,6 +97,30 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--max-resolution",
         metavar="WIDTHxHEIGHT",
         help="maximum image resolution",
+    )
+    search_options.add_argument(
+        "--sample-rate",
+        type=int,
+        metavar="HZ",
+        help="only return audio with this sample rate",
+    )
+    search_options.add_argument(
+        "--bitrate",
+        type=int,
+        metavar="BPS",
+        help="only return audio with this bitrate",
+    )
+    search_options.add_argument(
+        "--longer-than",
+        type=float,
+        metavar="SECONDS",
+        help="only return audio longer than this duration",
+    )
+    search_options.add_argument(
+        "--shorter-than",
+        type=float,
+        metavar="SECONDS",
+        help="only return audio shorter than this duration",
     )
     search_options.add_argument(
         "--modified-after",
@@ -176,10 +203,11 @@ def main(
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = build_argument_parser().parse_args(raw_argv)
     display = CliDisplay()
-    selected_embedding_factory = _embedding_factory_for_target(
-        args.target,
-        override=embedding_factory,
+    image_embedding_factory = embedding_factory or ClipImageEmbedding
+    selected_audio_embedding_factory = (
+        audio_embedding_factory or ClapAudioEmbedding
     )
+    search_target: str | None = None
     semantic_query = (args.query or "").strip()
     interactive_terminal = _is_interactive_terminal()
     interactive_mode = args.interactive or (
@@ -197,6 +225,11 @@ def main(
                 "Interactive search requires an interactive terminal"
             )
             return 2
+        if args.target == "audio":
+            display.print_error(
+                "Interactive audio search is not available yet; use a CLI query"
+            )
+            return 2
         if any(
             value is not None
             for value in (
@@ -204,6 +237,10 @@ def main(
                 args.file_format,
                 args.min_resolution,
                 args.max_resolution,
+                args.sample_rate,
+                args.bitrate,
+                args.longer_than,
+                args.shorter_than,
                 args.modified_after,
                 args.modified_before,
             )
@@ -234,9 +271,14 @@ def main(
             value is not None
             for value in (
                 args.name_contains,
+                args.target,
                 args.file_format,
                 args.min_resolution,
                 args.max_resolution,
+                args.sample_rate,
+                args.bitrate,
+                args.longer_than,
+                args.shorter_than,
                 args.modified_after,
                 args.modified_before,
                 args.limit,
@@ -279,6 +321,11 @@ def main(
             return 2
         try:
             metadata_query = _metadata_query(args)
+            search_target = _resolve_search_target(
+                args.target,
+                args.file_format,
+            )
+            _validate_target_filters(args, search_target)
         except ValueError as error:
             display.print_error(f"Invalid search: {error}")
             return 2
@@ -293,10 +340,8 @@ def main(
             if args.index_directory is not None:
                 coordinator = IndexCoordinator(
                     _index_handlers(
-                        image_embedding_factory=selected_embedding_factory,
-                        audio_embedding_factory=(
-                            audio_embedding_factory or ClapAudioEmbedding
-                        ),
+                        image_embedding_factory=image_embedding_factory,
+                        audio_embedding_factory=selected_audio_embedding_factory,
                     )
                 )
                 return _index_directory(
@@ -311,16 +356,22 @@ def main(
             file_index = FileIndexRepository(database)
             if interactive_mode:
                 with display.status("Initializing image model…"):
-                    embedding = selected_embedding_factory()
+                    embedding = image_embedding_factory()
                 runner = interactive_runner or _run_interactive_search
                 return runner(file_index, embedding, result_limit)
             assert metadata_query is not None
+            assert search_target is not None
             return _search(
                 file_index,
                 semantic_query,
                 metadata_query,
                 result_limit,
-                selected_embedding_factory,
+                search_target,
+                _embedding_factory_for_target(
+                    search_target,
+                    image_override=embedding_factory,
+                    audio_override=audio_embedding_factory,
+                ),
                 display,
             )
     except (EOFError, KeyboardInterrupt):
@@ -336,11 +387,66 @@ def main(
 def _embedding_factory_for_target(
     target: str,
     *,
-    override: EmbeddingFactory | None = None,
-) -> EmbeddingFactory:
+    image_override: EmbeddingFactory | None = None,
+    audio_override: AudioEmbeddingFactory | None = None,
+) -> SearchEmbeddingFactory:
     if target == "image":
-        return override or ClipImageEmbedding
+        return image_override or ClipImageEmbedding
+    if target == "audio":
+        return audio_override or ClapAudioEmbedding
     raise ValueError(f"Unsupported embedding target: {target}")
+
+
+def _resolve_search_target(
+    explicit_target: str | None,
+    file_format: str | None,
+) -> str:
+    inferred_target = _target_for_format(file_format) if file_format else None
+    if (
+        explicit_target is not None
+        and inferred_target is not None
+        and explicit_target != inferred_target
+    ):
+        raise ValueError(
+            f"Format {file_format!r} is {inferred_target}, not {explicit_target}"
+        )
+    if explicit_target is not None:
+        return explicit_target
+    if inferred_target is not None:
+        return inferred_target
+    raise ValueError(
+        "Search file type is required; use --target image or --target audio"
+    )
+
+
+def _target_for_format(file_format: str) -> str | None:
+    extension = f".{file_format.strip().removeprefix('.').casefold()}"
+    matches = tuple(
+        file_type
+        for file_type, extensions in (
+            ("image", ImageMetadataParser.supported_extensions),
+            ("audio", AudioMetadataParser.supported_extensions),
+        )
+        if extension in extensions
+    )
+    return matches[0] if len(matches) == 1 else None
+
+
+def _validate_target_filters(args: argparse.Namespace, target: str) -> None:
+    if target == "audio" and (
+        args.min_resolution is not None or args.max_resolution is not None
+    ):
+        raise ValueError("Resolution filters require the image target")
+    if target == "image" and any(
+        value is not None
+        for value in (
+            args.sample_rate,
+            args.bitrate,
+            args.longer_than,
+            args.shorter_than,
+        )
+    ):
+        raise ValueError("Audio metadata filters require the audio target")
 
 
 def _is_interactive_terminal() -> bool:
@@ -500,6 +606,20 @@ def _metadata_query(args: argparse.Namespace) -> FileMetadataQuery:
         and modified_after > modified_before
     ):
         raise ValueError("modified-after cannot be later than modified-before")
+    if args.sample_rate is not None and args.sample_rate < 1:
+        raise ValueError("sample rate must be positive")
+    if args.bitrate is not None and args.bitrate < 1:
+        raise ValueError("bitrate must be positive")
+    if args.longer_than is not None and args.longer_than < 0:
+        raise ValueError("longer-than duration must be non-negative")
+    if args.shorter_than is not None and args.shorter_than <= 0:
+        raise ValueError("shorter-than duration must be positive")
+    if (
+        args.longer_than is not None
+        and args.shorter_than is not None
+        and args.longer_than >= args.shorter_than
+    ):
+        raise ValueError("longer-than duration must be less than shorter-than")
 
     return FileMetadataQuery(
         name_contains=args.name_contains,
@@ -508,6 +628,10 @@ def _metadata_query(args: argparse.Namespace) -> FileMetadataQuery:
         min_height=min_height,
         max_width=max_width,
         max_height=max_height,
+        sample_rate_hz=args.sample_rate,
+        bitrate_bps=args.bitrate,
+        duration_longer_than=args.longer_than,
+        duration_shorter_than=args.shorter_than,
         modified_after=modified_after,
         modified_before=modified_before,
     )
@@ -518,29 +642,38 @@ def _search(
     semantic_query: str,
     metadata_query: FileMetadataQuery,
     limit: int,
-    embedding_factory: EmbeddingFactory,
+    target: str,
+    embedding_factory: SearchEmbeddingFactory,
     display: CliDisplay,
 ) -> int:
     total_started = perf_counter()
 
     initialization_started = perf_counter()
-    with display.status("Initializing image model…"):
+    with display.status(f"Initializing {target} model…"):
         embedding = embedding_factory()
     initialization_ms = (perf_counter() - initialization_started) * 1000
 
-    embedding_started = perf_counter()
-    query_vector = embedding.predict_text(semantic_query)
-    embedding_ms = (perf_counter() - embedding_started) * 1000
+    try:
+        embedding_started = perf_counter()
+        query_vector = embedding.predict_text(semantic_query)
+        embedding_ms = (perf_counter() - embedding_started) * 1000
 
-    fetch_started = perf_counter()
-    results = file_index.semantic_search(
-        query_vector,
-        vector_name=embedding.vector_name,
-        limit=limit,
-        metadata_filter=file_metadata_filter(metadata_query),
-    )
-    fetch_ms = (perf_counter() - fetch_started) * 1000
-    total_ms = (perf_counter() - total_started) * 1000
+        fetch_started = perf_counter()
+        search = (
+            file_index.semantic_segment_search
+            if target == "audio"
+            else file_index.semantic_search
+        )
+        results = search(
+            query_vector,
+            vector_name=embedding.vector_name,
+            limit=limit,
+            metadata_filter=file_metadata_filter(metadata_query),
+        )
+        fetch_ms = (perf_counter() - fetch_started) * 1000
+        total_ms = (perf_counter() - total_started) * 1000
+    finally:
+        embedding.close()
 
     display.print_search_results(
         results,

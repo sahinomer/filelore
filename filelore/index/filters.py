@@ -63,6 +63,26 @@ def file_metadata_filter(query: FileMetadataQuery) -> MetadataFilter | None:
             query.max_height,
             ConditionOperator.LESS_THAN_OR_EQUAL,
         ),
+        (
+            "metadata.sample_rate_hz",
+            query.sample_rate_hz,
+            ConditionOperator.EQUAL,
+        ),
+        (
+            "metadata.bitrate_bps",
+            query.bitrate_bps,
+            ConditionOperator.EQUAL,
+        ),
+        (
+            "metadata.duration_seconds",
+            query.duration_longer_than,
+            ConditionOperator.GREATER_THAN,
+        ),
+        (
+            "metadata.duration_seconds",
+            query.duration_shorter_than,
+            ConditionOperator.LESS_THAN,
+        ),
     )
     for field, value, operator in numeric_fields:
         if value is not None:

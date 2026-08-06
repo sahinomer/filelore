@@ -12,8 +12,9 @@ and retrieval under the user's control.
 - Combine semantic search with metadata filters.
 - Store indexes locally or in a configured Qdrant service.
 
-The current implementation supports image and audio indexing, with
-text-to-image semantic search available through the CLI and TUI.
+The current implementation supports image and audio indexing, text-to-image
+search through the CLI and TUI, and raw text-to-audio chunk search through the
+CLI.
 
 ## Setup
 
@@ -89,10 +90,12 @@ The existing one-shot interface remains available.
 Search the index with a natural-language description:
 
 ```sh
-uv run python -m filelore "a red sports car"
+uv run python -m filelore "a red sports car" --target image
 ```
 
-Metadata filters can narrow the results:
+One-shot search requires `--target image` or `--target audio` so FileLore
+loads only the required model. A recognized `--format` can imply the target,
+so the image target is inferred in this example:
 
 ```sh
 uv run python -m filelore "a mountain landscape" \
@@ -101,10 +104,22 @@ uv run python -m filelore "a mountain landscape" \
   --limit 20
 ```
 
+Audio search currently returns raw chunk matches with their timestamps. Audio
+metadata filters can narrow those results:
+
+```sh
+uv run python -m filelore "glass breaking" \
+  --target audio \
+  --sample-rate 48000 \
+  --bitrate 192000 \
+  --longer-than 1 \
+  --shorter-than 30
+```
+
 ## Areas of exploration
 
 - Text-document indexing and content search.
-- Audio indexing and semantic retrieval.
+- Grouped audio search results in the CLI and TUI.
 - Speech transcription and search.
 
 ## License

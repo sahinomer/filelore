@@ -4,7 +4,7 @@ from datetime import datetime
 
 import pytest
 
-from filelore.index import file_metadata_filter
+from filelore.index import FileMetadataQuery, file_metadata_filter
 from filelore.search_query import parse_search_query
 from filelore.storage import ConditionOperator
 
@@ -72,6 +72,37 @@ def test_before_filter_uses_an_exclusive_partial_date_boundary() -> None:
     )
     assert before_condition.value == datetime(2026, 1, 1).astimezone()
     assert before_condition.operator is ConditionOperator.LESS_THAN
+
+
+def test_audio_metadata_query_uses_exact_stream_and_strict_duration_filters() -> None:
+    metadata_filter = file_metadata_filter(
+        FileMetadataQuery(
+            sample_rate_hz=48_000,
+            bitrate_bps=192_000,
+            duration_longer_than=5.0,
+            duration_shorter_than=30.0,
+        )
+    )
+
+    assert metadata_filter is not None
+    conditions = {
+        condition.field: (condition.value, condition.operator)
+        for condition in metadata_filter.all_of
+        if condition.field != "metadata.duration_seconds"
+    }
+    durations = [
+        (condition.value, condition.operator)
+        for condition in metadata_filter.all_of
+        if condition.field == "metadata.duration_seconds"
+    ]
+    assert conditions == {
+        "metadata.sample_rate_hz": (48_000, ConditionOperator.EQUAL),
+        "metadata.bitrate_bps": (192_000, ConditionOperator.EQUAL),
+    }
+    assert durations == [
+        (5.0, ConditionOperator.GREATER_THAN),
+        (30.0, ConditionOperator.LESS_THAN),
+    ]
 
 
 @pytest.mark.parametrize(

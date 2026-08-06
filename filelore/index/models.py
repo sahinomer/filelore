@@ -35,9 +35,19 @@ class DuplicateGroup:
 
 
 @dataclass(frozen=True, slots=True)
+class FileSegmentMatch:
+    """Raw timed segment responsible for a semantic file match."""
+
+    index: int
+    start_seconds: float
+    end_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
 class FileSearchResult:
     file: FileIndexEntry
     score: float
+    segment: FileSegmentMatch | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,5 +60,9 @@ class FileMetadataQuery:
     min_height: int | None = None
     max_width: int | None = None
     max_height: int | None = None
+    sample_rate_hz: int | None = None
+    bitrate_bps: int | None = None
+    duration_longer_than: float | None = None
+    duration_shorter_than: float | None = None
     modified_after: datetime | None = None
     modified_before: datetime | None = None

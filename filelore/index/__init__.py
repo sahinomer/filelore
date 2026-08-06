@@ -17,6 +17,7 @@ from filelore.index.models import (
     DuplicateGroup,
     FileIndexEntry,
     FileMetadataQuery,
+    FileSegmentMatch,
     FileSearchResult,
 )
 from filelore.index.pipeline import (
@@ -38,6 +39,7 @@ __all__ = [
     "FileIndexRepository",
     "FileIndexer",
     "FileMetadataQuery",
+    "FileSegmentMatch",
     "FileProcessor",
     "FileSearchResult",
     "IndexCoordinator",

@@ -11,6 +11,8 @@ from filelore.embedding import AudioEmbedding, AudioInput, EmbeddingVector
 from filelore.index import (
     FileIndexer,
     FileIndexRepository,
+    FileMetadataQuery,
+    file_metadata_filter,
     file_point_id,
     file_segment_point_id,
 )
@@ -140,6 +142,30 @@ def test_file_indexer_processes_audio_and_stores_timed_child_points(
             [1.0, 0.0, 0.0],
             [0.0, 1.0, 0.0],
         ]
+
+        results = repository.semantic_segment_search(
+            [1.0, 0.0, 0.0],
+            vector_name="audio_test",
+            metadata_filter=file_metadata_filter(
+                FileMetadataQuery(
+                    file_format="wav",
+                    sample_rate_hz=100,
+                    bitrate_bps=1_600,
+                    duration_longer_than=10.0,
+                    duration_shorter_than=20.0,
+                )
+            ),
+        )
+
+        assert [result.file.path for result in results] == [
+            audio_path.resolve(),
+            audio_path.resolve(),
+        ]
+        assert [result.segment.index for result in results if result.segment] == [
+            0,
+            1,
+        ]
+        assert results[0].score > results[1].score
 
 
 def test_reindex_replaces_stale_segments_and_remove_cascades(

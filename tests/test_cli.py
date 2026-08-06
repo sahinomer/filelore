@@ -108,6 +108,10 @@ class AudioCliEmbedding(AudioEmbedding):
         return tuple((1.0, 0.0, 0.0) for _ in texts)
 
 
+class ChunkedAudioCliEmbedding(AudioCliEmbedding):
+    max_length_seconds = 0.1
+
+
 class TerminalStringIO(StringIO):
     def isatty(self) -> bool:
         return True
@@ -122,7 +126,7 @@ def test_cli_defaults_to_persistent_local_qdrant_index(
 
     assert args.qdrant_url is None
     assert args.index_path == DEFAULT_INDEX_PATH
-    assert args.target == "image"
+    assert args.target is None
     assert args.index_types is None
 
 
@@ -179,6 +183,30 @@ def test_cli_parses_semantic_query_and_optional_search_filters() -> None:
     assert args.max_resolution == "3840x2160"
     assert args.modified_after == "2025-01-01"
     assert args.modified_before == "2025-12-31"
+
+
+def test_cli_parses_audio_target_and_metadata_filters() -> None:
+    args = build_argument_parser().parse_args(
+        [
+            "rain",
+            "--type",
+            "audio",
+            "--sample-rate",
+            "48000",
+            "--bitrate",
+            "192000",
+            "--longer-than",
+            "5",
+            "--shorter-than",
+            "30",
+        ]
+    )
+
+    assert args.target == "audio"
+    assert args.sample_rate == 48_000
+    assert args.bitrate == 192_000
+    assert args.longer_than == 5.0
+    assert args.shorter_than == 30.0
 
 
 def test_cli_formats_durations_with_readable_units() -> None:
@@ -454,6 +482,63 @@ def test_cli_requires_a_query_when_not_indexing(
     assert "Search query is required unless --index is used" in captured.err
 
 
+def test_cli_search_requires_a_target_when_format_cannot_infer_one(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = main(["rain"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "Search file type is required" in captured.err
+
+
+def test_cli_rejects_a_target_that_conflicts_with_format(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = main(["rain", "--target", "audio", "--format", "jpg"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "is image, not audio" in captured.err
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    (
+        (["--sample-rate", "0"], "sample rate must be positive"),
+        (["--bitrate", "-1"], "bitrate must be positive"),
+        (["--longer-than", "-1"], "must be non-negative"),
+        (["--shorter-than", "0"], "must be positive"),
+        (
+            ["--longer-than", "30", "--shorter-than", "10"],
+            "must be less than",
+        ),
+    ),
+)
+def test_cli_rejects_invalid_audio_metadata_filters(
+    arguments: list[str],
+    message: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = main(["rain", "--target", "audio", *arguments])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert message in captured.err
+
+
+def test_cli_rejects_audio_filters_for_image_search(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = main(
+        ["car", "--target", "image", "--sample-rate", "48000"]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "Audio metadata filters require the audio target" in captured.err
+
+
 def test_cli_rejects_explicit_interactive_search_without_a_terminal(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -645,6 +730,60 @@ def test_cli_indexes_embeddings_and_searches_by_semantic_description(
     assert "Timing" in captured.out
 
 
+def test_cli_searches_raw_audio_chunks_with_metadata_filters(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database_path = tmp_path / "qdrant-index"
+    audio_path = tmp_path / "effect.wav"
+    create_wave(audio_path)
+    assert (
+        main(
+            [
+                "--index",
+                str(tmp_path),
+                "--index-type",
+                "audio",
+                "--index-path",
+                str(database_path),
+            ],
+            audio_embedding_factory=ChunkedAudioCliEmbedding,
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    exit_code = main(
+        [
+            "effect",
+            "--format",
+            "wav",
+            "--sample-rate",
+            "8000",
+            "--bitrate",
+            "128000",
+            "--longer-than",
+            "0.1",
+            "--shorter-than",
+            "1",
+            "--index-path",
+            str(database_path),
+        ],
+        audio_embedding_factory=ChunkedAudioCliEmbedding,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Initializing audio model" in captured.err
+    assert captured.out.count(audio_path.name) == 4
+    assert "4 results" in captured.out
+    assert "Audio" in captured.out
+    assert "8 kHz" in captured.out
+    assert "128 kbps" in captured.out
+    assert "Chunk" in captured.out
+    assert "0:00.00" in captured.out
+
+
 def test_cli_shows_search_model_initialization_on_stderr(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -669,7 +808,7 @@ def test_cli_shows_search_model_initialization_on_stderr(
     capsys.readouterr()
 
     exit_code = main(
-        ["red", "--index-path", str(database_path)],
+        ["red", "--target", "image", "--index-path", str(database_path)],
         embedding_factory=ColorCliEmbedding,
     )
 
@@ -706,7 +845,7 @@ def test_cli_search_uses_score_colors_in_terminal(
     terminal_stdout = TerminalStringIO()
     monkeypatch.setattr(sys, "stdout", terminal_stdout)
     exit_code = main(
-        ["red", "--index-path", str(database_path)],
+        ["red", "--target", "image", "--index-path", str(database_path)],
         embedding_factory=ColorCliEmbedding,
     )
 

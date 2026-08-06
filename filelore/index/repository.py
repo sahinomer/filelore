@@ -20,6 +20,7 @@ from filelore.index.models import (
     DuplicateGroup,
     FileIndexEntry,
     FileMetadataQuery,
+    FileSegmentMatch,
     FileSearchResult,
 )
 from filelore.metadata import BaseMetadata
@@ -162,11 +163,7 @@ class FileIndexRepository:
         indexed_at = datetime.now(timezone.utc)
         point_id = file_point_id(path)
         metadata_dict = metadata.to_dict()
-        detected_format = (
-            metadata_dict.get("image_format")
-            or metadata_dict.get("audio_format")
-            or metadata.extension
-        )
+        detected_format = metadata_dict.get("image_format") or metadata.extension
         payload = {
             "schema_version": 1,
             "record_type": "file",
@@ -293,6 +290,33 @@ class FileIndexRepository:
             for result in results
         )
 
+    def semantic_segment_search(
+        self,
+        vector: Sequence[float],
+        *,
+        vector_name: str,
+        limit: int = 10,
+        metadata_filter: MetadataFilter | None = None,
+    ) -> tuple[FileSearchResult, ...]:
+        """Return raw timed child matches without grouping parent files."""
+        if not self.database.collection_exists(self.segment_collection_name):
+            return ()
+        results = self.database.search(
+            self.segment_collection_name,
+            vector,
+            vector_name=vector_name,
+            limit=limit,
+            metadata_filter=metadata_filter,
+        )
+        return tuple(
+            FileSearchResult(
+                file=self._to_entry(result.record),
+                score=result.score,
+                segment=self._to_segment(result.record),
+            )
+            for result in results
+        )
+
     def iter_all(self, *, page_size: int = 100) -> Iterator[FileIndexEntry]:
         offset: str | None = None
         while True:
@@ -354,3 +378,16 @@ class FileIndexRepository:
             metadata=dict(metadata),
             indexed_at=datetime.fromisoformat(indexed_at),
         )
+
+    @staticmethod
+    def _to_segment(record: StoredRecord) -> FileSegmentMatch:
+        try:
+            return FileSegmentMatch(
+                index=int(record.payload["segment_index"]),
+                start_seconds=float(record.payload["segment_start_seconds"]),
+                end_seconds=float(record.payload["segment_end_seconds"]),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(
+                f"Segment record {record.id} has invalid timestamps"
+            ) from error

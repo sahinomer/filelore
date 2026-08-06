@@ -27,7 +27,7 @@ from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 
-from filelore.index import FileSearchResult
+from filelore.index import FileSearchResult, FileSegmentMatch
 
 
 class ProcessingRateColumn(ProgressColumn):
@@ -180,6 +180,8 @@ def search_results_renderable(
             )
             table.add_row("", _directory_text(path.parent), "")
             table.add_row("", _details_text(result.file.metadata), "")
+            if result.segment is not None:
+                table.add_row("", _segment_text(result.segment), "")
             table.add_row("", _modified_text(result.file.metadata), "")
             if rank < len(results):
                 table.add_row("", "", "")
@@ -252,9 +254,14 @@ def _directory_text(directory: Path) -> Text:
 
 def _details_text(metadata: dict[str, Any]) -> Text:
     details: list[str] = []
-    image_format = metadata.get("image_format") or metadata.get("extension")
-    if image_format:
-        details.append(str(image_format).lstrip(".").upper())
+    is_audio = "audio_format" in metadata or "duration_seconds" in metadata
+    media_format = (
+        metadata.get("audio_format")
+        or metadata.get("image_format")
+        or metadata.get("extension")
+    )
+    if media_format:
+        details.append(str(media_format).lstrip(".").upper())
 
     width = metadata.get("width")
     height = metadata.get("height")
@@ -265,6 +272,27 @@ def _details_text(metadata: dict[str, Any]) -> Text:
     if color_mode:
         details.append(str(color_mode))
 
+    duration = metadata.get("duration_seconds")
+    if isinstance(duration, (int, float)):
+        details.append(_duration_text(float(duration)))
+
+    sample_rate = metadata.get("sample_rate_hz")
+    if isinstance(sample_rate, int):
+        details.append(f"{sample_rate / 1000:g} kHz")
+
+    bitrate = metadata.get("bitrate_bps")
+    if isinstance(bitrate, int):
+        details.append(f"{bitrate / 1000:g} kbps")
+
+    channels = metadata.get("channels")
+    if isinstance(channels, int):
+        channel_label = "channel" if channels == 1 else "channels"
+        details.append(f"{channels} {channel_label}")
+
+    codec = metadata.get("codec")
+    if codec:
+        details.append(str(codec))
+
     size_bytes = metadata.get("size_bytes")
     if isinstance(size_bytes, int):
         details.append(decimal(size_bytes))
@@ -273,9 +301,33 @@ def _details_text(metadata: dict[str, Any]) -> Text:
     if isinstance(frame_count, int) and frame_count > 1:
         details.append(f"{frame_count:,} frames")
 
-    text = Text("Image      ", style="dim")
+    text = Text("Audio      " if is_audio else "Image      ", style="dim")
     text.append("  •  ".join(details) if details else "Details unavailable")
     return text
+
+
+def _segment_text(segment: FileSegmentMatch) -> Text:
+    text = Text("Chunk      ", style="dim")
+    text.append(
+        f"#{segment.index + 1}  "
+        f"{_timestamp_text(segment.start_seconds)} – "
+        f"{_timestamp_text(segment.end_seconds)}"
+    )
+    return text
+
+
+def _duration_text(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.2f} s"
+    return _timestamp_text(seconds)
+
+
+def _timestamp_text(seconds: float) -> str:
+    minutes, remaining = divmod(max(seconds, 0.0), 60)
+    hours, minutes = divmod(int(minutes), 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{remaining:05.2f}"
+    return f"{minutes}:{remaining:05.2f}"
 
 
 def _modified_text(metadata: dict[str, Any]) -> Text:
