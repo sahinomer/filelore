@@ -18,6 +18,7 @@ from typing import (
 )
 
 from filelore.embedding import BaseEmbedding
+from filelore.index.identity import calculate_file_hash, normalized_path
 from filelore.index.models import FileIndexEntry
 from filelore.index.repository import FileIndexRepository
 from filelore.metadata import BaseMetadata
@@ -26,6 +27,7 @@ from filelore.storage import DistanceMetric, VectorConfig, VectorDatabase
 
 
 MetadataType = TypeVar("MetadataType", bound=BaseMetadata)
+IndexChange = Literal["new", "updated"]
 
 
 class FileProcessor(Protocol[MetadataType]):
@@ -67,6 +69,27 @@ class FileIndexer(Generic[MetadataType]):
     def index_batch(self, paths: Sequence[str | Path]) -> IndexingBatch:
         processed = self.processor.process_batch(paths)
         entries = self.repository.store_prepared_many(processed.files)
+        return IndexingBatch(entries=entries, failures=processed.failures)
+
+    def index_candidates(
+        self, candidates: Sequence[IndexCandidate]
+    ) -> IndexingBatch:
+        """Process planned files and persist their precomputed hashes."""
+        processed = self.processor.process_batch(
+            tuple(candidate.path for candidate in candidates)
+        )
+        hashes_by_path = {
+            normalized_path(candidate.path): candidate.content_hash
+            for candidate in candidates
+        }
+        content_hashes = tuple(
+            hashes_by_path[normalized_path(item.metadata.path)]
+            for item in processed.files
+        )
+        entries = self.repository.store_prepared_many(
+            processed.files,
+            content_hashes=content_hashes,
+        )
         return IndexingBatch(entries=entries, failures=processed.failures)
 
 
@@ -147,6 +170,57 @@ class IndexPlan:
         return sum(len(queue.paths) for queue in self.queues)
 
 
+@dataclass(frozen=True, slots=True)
+class IndexCandidate:
+    """A new or changed file ready for format-specific processing."""
+
+    path: Path
+    content_hash: str
+    change: IndexChange
+
+
+@dataclass(frozen=True, slots=True)
+class IndexWorkQueue:
+    """Change-aware work and counts for one discovered file type."""
+
+    handler: IndexHandler
+    discovered_count: int
+    candidates: tuple[IndexCandidate, ...]
+    unchanged_count: int
+    failures: tuple[ProcessingFailure, ...] = ()
+
+    @property
+    def file_type(self) -> str:
+        return self.handler.file_type
+
+    @property
+    def new_count(self) -> int:
+        return sum(item.change == "new" for item in self.candidates)
+
+    @property
+    def updated_count(self) -> int:
+        return sum(item.change == "updated" for item in self.candidates)
+
+    @property
+    def work_count(self) -> int:
+        return len(self.candidates)
+
+
+@dataclass(frozen=True, slots=True)
+class IndexWorkPlan:
+    """Hash-classified queues that can skip unchanged indexed content."""
+
+    queues: tuple[IndexWorkQueue, ...]
+
+    @property
+    def total_files(self) -> int:
+        return sum(queue.discovered_count for queue in self.queues)
+
+    @property
+    def work_count(self) -> int:
+        return sum(queue.work_count for queue in self.queues)
+
+
 class IndexCoordinator:
     """Discover supported files and arrange homogeneous model queues."""
 
@@ -220,9 +294,64 @@ class IndexCoordinator:
             )
         )
 
+    def classify_changes(
+        self,
+        plan: IndexPlan,
+        repository: FileIndexRepository,
+        *,
+        hash_file: Callable[[str | Path], str] | None = None,
+        on_progress: Callable[[int], None] | None = None,
+    ) -> IndexWorkPlan:
+        """Hash discovered files and exclude content already in the index."""
+        selected_hash_file = hash_file or calculate_file_hash
+        queues: list[IndexWorkQueue] = []
+        for queue in plan.queues:
+            existing_entries = repository.get_by_paths(queue.paths)
+            candidates: list[IndexCandidate] = []
+            failures: list[ProcessingFailure] = []
+            unchanged_count = 0
+            for path, existing in zip(queue.paths, existing_entries):
+                try:
+                    content_hash = selected_hash_file(path)
+                except OSError as error:
+                    failures.append(ProcessingFailure(path=path, error=error))
+                else:
+                    if existing is None:
+                        candidates.append(
+                            IndexCandidate(path, content_hash, "new")
+                        )
+                    elif existing.content_hash != content_hash:
+                        candidates.append(
+                            IndexCandidate(path, content_hash, "updated")
+                        )
+                    else:
+                        unchanged_count += 1
+                finally:
+                    if on_progress is not None:
+                        on_progress(1)
+            queues.append(
+                IndexWorkQueue(
+                    handler=queue.handler,
+                    discovered_count=len(queue.paths),
+                    candidates=tuple(candidates),
+                    unchanged_count=unchanged_count,
+                    failures=tuple(failures),
+                )
+            )
+        return IndexWorkPlan(queues=tuple(queues))
+
     @staticmethod
     def batches(queue: IndexQueue, batch_size: int) -> Iterator[tuple[Path, ...]]:
         if batch_size < 1:
             raise ValueError("Index batch size must be positive")
         for start in range(0, len(queue.paths), batch_size):
             yield queue.paths[start : start + batch_size]
+
+    @staticmethod
+    def work_batches(
+        queue: IndexWorkQueue, batch_size: int
+    ) -> Iterator[tuple[IndexCandidate, ...]]:
+        if batch_size < 1:
+            raise ValueError("Index batch size must be positive")
+        for start in range(0, len(queue.candidates), batch_size):
+            yield queue.candidates[start : start + batch_size]

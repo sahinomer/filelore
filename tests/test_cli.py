@@ -138,6 +138,12 @@ def test_cli_accepts_repeatable_index_type_filters() -> None:
     assert args.index_types == ["image", "audio"]
 
 
+def test_cli_accepts_yes_without_confirmation() -> None:
+    args = build_argument_parser().parse_args(["--index", ".", "-y"])
+
+    assert args.assume_yes is True
+
+
 def test_cli_accepts_qdrant_url_environment_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -247,6 +253,7 @@ def test_cli_indexing_emits_only_expected_progress_feedback(
         [
             "--index",
             str(tmp_path),
+            "--yes",
             "--index-path",
             str(tmp_path / "qdrant-index"),
             "--batch-size",
@@ -259,12 +266,221 @@ def test_cli_indexing_emits_only_expected_progress_feedback(
     assert exit_code == 0
     assert captured.out == ""
     stderr_lines = captured.err.splitlines()
-    assert len(stderr_lines) == 3
+    assert len(stderr_lines) == 7
     assert stderr_lines[0].startswith("Discovering supported files")
-    assert stderr_lines[1].startswith("Initializing image model")
-    assert stderr_lines[2].startswith("Indexing image files")
-    assert "2/2" in stderr_lines[2]
-    assert "100%" in stderr_lines[2]
+    assert stderr_lines[1].startswith("Checking file changes")
+    assert stderr_lines[2] == "Discovery complete"
+    assert "Image files" in stderr_lines[3]
+    assert "2 found" in stderr_lines[3]
+    assert "2 new" in stderr_lines[3]
+    assert stderr_lines[4].startswith("Initializing image model")
+    assert stderr_lines[5].startswith("Indexing image files")
+    assert "2/2" in stderr_lines[5]
+    assert "100%" in stderr_lines[5]
+    assert stderr_lines[6].startswith("Image files: 2 added")
+
+
+def test_cli_requires_yes_when_indexing_without_an_interactive_input(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    create_image(tmp_path / "photo.png")
+
+    def unexpected_factory() -> ColorCliEmbedding:
+        raise AssertionError("Model must not load before confirmation")
+
+    exit_code = main(
+        [
+            "--index",
+            str(tmp_path),
+            "--index-path",
+            str(tmp_path / "qdrant-index"),
+        ],
+        image_embedding_factory=unexpected_factory,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "1 new" in captured.err
+    assert "rerun with --yes" in captured.err
+
+
+def test_cli_confirms_each_media_queue_before_loading_its_model(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "qdrant-index"
+    image_path = tmp_path / "photo.png"
+    audio_path = tmp_path / "effect.wav"
+    create_image(image_path)
+    create_wave(audio_path)
+    monkeypatch.setattr(sys, "stdin", TerminalStringIO("y\nn\n"))
+
+    def unexpected_audio_factory() -> AudioCliEmbedding:
+        raise AssertionError("Declined audio model must remain unloaded")
+
+    exit_code = main(
+        ["--index", str(tmp_path), "--index-path", str(database_path)],
+        image_embedding_factory=ColorCliEmbedding,
+        audio_embedding_factory=unexpected_audio_factory,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Index 1 image file (1 new)?" in captured.err
+    assert "Index 1 audio file (1 new)?" in captured.err
+    assert "Skipped 1 audio file" in captured.err
+    with QdrantVectorDatabase(database_path) as database:
+        repository = FileIndexRepository(database)
+        assert repository.get_by_path(image_path) is not None
+        assert repository.get_by_path(audio_path) is None
+
+
+def test_cli_skips_unchanged_files_without_loading_a_model(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database_path = tmp_path / "qdrant-index"
+    image_path = tmp_path / "photo.png"
+    create_image(image_path)
+    arguments = [
+        "--index",
+        str(tmp_path),
+        "--yes",
+        "--index-path",
+        str(database_path),
+    ]
+    assert main(arguments, image_embedding_factory=ColorCliEmbedding) == 0
+    capsys.readouterr()
+
+    def unexpected_factory() -> ColorCliEmbedding:
+        raise AssertionError("Unchanged files must not load a model")
+
+    exit_code = main(
+        arguments,
+        image_embedding_factory=unexpected_factory,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "1 found" in captured.err
+    assert "0 new" in captured.err
+    assert "0 changed" in captured.err
+    assert "1 unchanged" in captured.err
+    assert "Initializing image model" not in captured.err
+    assert "Indexing image files" not in captured.err
+
+
+def test_cli_reindexes_changed_files_and_reports_an_update(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database_path = tmp_path / "qdrant-index"
+    image_path = tmp_path / "photo.png"
+    create_image(image_path)
+    arguments = [
+        "--index",
+        str(tmp_path),
+        "--yes",
+        "--index-path",
+        str(database_path),
+    ]
+    assert main(arguments, image_embedding_factory=ColorCliEmbedding) == 0
+    capsys.readouterr()
+    create_image(image_path, size=(24, 16))
+
+    exit_code = main(arguments, image_embedding_factory=ColorCliEmbedding)
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "0 new" in captured.err
+    assert "1 changed" in captured.err
+    assert "Image files: 0 added" in captured.err
+    assert "1 updated" in captured.err
+
+
+def test_cli_resumes_after_an_interrupted_batch(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database_path = tmp_path / "qdrant-index"
+    first_path = tmp_path / "a.png"
+    second_path = tmp_path / "b.png"
+    create_image(first_path)
+    create_image(second_path)
+
+    class InterruptingEmbedding(ColorCliEmbedding):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def predict_batch(
+            self, items: Sequence[str | Path | Image.Image]
+        ) -> tuple[EmbeddingVector, ...]:
+            self.calls += 1
+            if self.calls == 2:
+                raise KeyboardInterrupt
+            return super().predict_batch(items)
+
+    arguments = [
+        "--index",
+        str(tmp_path),
+        "--yes",
+        "--batch-size",
+        "1",
+        "--index-path",
+        str(database_path),
+    ]
+    assert main(arguments, image_embedding_factory=InterruptingEmbedding) == 130
+    capsys.readouterr()
+    embedded_paths: list[Path] = []
+
+    class RecordingEmbedding(ColorCliEmbedding):
+        def predict_batch(
+            self, items: Sequence[str | Path | Image.Image]
+        ) -> tuple[EmbeddingVector, ...]:
+            embedded_paths.extend(
+                Path(item) for item in items if isinstance(item, (str, Path))
+            )
+            return super().predict_batch(items)
+
+    exit_code = main(arguments, image_embedding_factory=RecordingEmbedding)
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "2 found" in captured.err
+    assert "1 new" in captured.err
+    assert "1 unchanged" in captured.err
+    assert embedded_paths == [second_path]
+
+
+def test_cli_reuses_change_scan_hash_during_storage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    create_image(tmp_path / "photo.png")
+
+    def unexpected_rehash(path: str | Path) -> str:
+        raise AssertionError(f"Storage rehashed {path}")
+
+    monkeypatch.setattr(
+        "filelore.index.repository.calculate_file_hash",
+        unexpected_rehash,
+    )
+
+    exit_code = main(
+        [
+            "--index",
+            str(tmp_path),
+            "--yes",
+            "--index-path",
+            str(tmp_path / "qdrant-index"),
+        ],
+        image_embedding_factory=ColorCliEmbedding,
+    )
+
+    assert exit_code == 0
 
 
 def test_cli_failed_files_still_complete_progress(
@@ -282,6 +498,7 @@ def test_cli_failed_files_still_complete_progress(
         [
             "--index",
             str(tmp_path),
+            "--yes",
             "--index-path",
             str(tmp_path / "qdrant-index"),
         ],
@@ -307,6 +524,7 @@ def test_cli_empty_discovery_has_no_incomplete_progress_bar(
         [
             "--index",
             str(tmp_path),
+            "--yes",
             "--index-path",
             str(tmp_path / "qdrant-index"),
         ],
@@ -333,6 +551,7 @@ def test_cli_reports_invalid_images_and_indexes_the_remaining_files(
         [
             "--index",
             str(tmp_path),
+            "--yes",
             "--index-path",
             str(tmp_path / "qdrant-index"),
         ],
@@ -347,7 +566,10 @@ def test_cli_reports_invalid_images_and_indexes_the_remaining_files(
 
 def test_cli_smart_indexing_loads_models_sequentially(
     tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("NO_COLOR", "1")
     database_path = tmp_path / "qdrant-index"
     image_path = tmp_path / "photo.png"
     audio_path = tmp_path / "effect.wav"
@@ -376,6 +598,7 @@ def test_cli_smart_indexing_loads_models_sequentially(
         [
             "--index",
             str(tmp_path),
+            "--yes",
             "--index-path",
             str(database_path),
         ],
@@ -390,6 +613,16 @@ def test_cli_smart_indexing_loads_models_sequentially(
         "audio:load",
         "audio:close",
     ]
+    progress_lines = [
+        line
+        for line in capsys.readouterr().err.splitlines()
+        if line.startswith("Indexing ")
+    ]
+    assert [line.split("  ", 1)[0] for line in progress_lines] == [
+        "Indexing image files",
+        "Indexing audio files",
+    ]
+    assert [line.index("-") for line in progress_lines] == [22, 22]
     with QdrantVectorDatabase(database_path) as database:
         repository = FileIndexRepository(database)
         assert repository.count() == 2
@@ -412,6 +645,7 @@ def test_cli_index_type_ignores_other_queues_without_loading_their_model(
         [
             "--index",
             str(tmp_path),
+            "--yes",
             "--index-type",
             "image",
             "--index-path",
@@ -445,6 +679,7 @@ def test_cli_audio_index_type_does_not_load_the_image_model(
         [
             "--index",
             str(tmp_path),
+            "--yes",
             "--index-type",
             "audio",
             "--index-path",
@@ -479,6 +714,7 @@ def test_cli_continues_other_queues_after_a_model_load_failure(
         [
             "--index",
             str(tmp_path),
+            "--yes",
             "--index-path",
             str(database_path),
         ],
@@ -654,7 +890,7 @@ def test_cli_reports_an_invalid_resolution_filter(
 
 @pytest.mark.parametrize(
     "index_arguments",
-    (["--no-recursive"], ["--index-type", "audio"]),
+    (["--no-recursive"], ["--index-type", "audio"], ["--yes"]),
 )
 def test_cli_rejects_index_options_during_search(
     index_arguments: list[str],
@@ -680,6 +916,7 @@ def test_cli_searches_with_optional_metadata_filters(
             [
                 "--index",
                 str(tmp_path),
+                "--yes",
                 "--index-path",
                 str(database_path),
             ],
@@ -741,6 +978,7 @@ def test_cli_indexes_embeddings_and_searches_by_semantic_description(
         [
             "--index",
             str(tmp_path),
+            "--yes",
             "--index-path",
             str(database_path),
         ],
@@ -775,6 +1013,7 @@ def test_cli_searches_raw_audio_chunks_with_metadata_filters(
             [
                 "--index",
                 str(tmp_path),
+                "--yes",
                 "--index-type",
                 "audio",
                 "--index-path",
@@ -831,6 +1070,7 @@ def test_cli_shows_search_model_initialization_on_stderr(
             [
                 "--index",
                 str(tmp_path),
+                "--yes",
                 "--index-path",
                 str(database_path),
             ],
@@ -868,7 +1108,13 @@ def test_cli_search_uses_score_colors_in_terminal(
     Image.new("RGB", (8, 8), color=(0, 0, 255)).save(blue_path)
     assert (
         main(
-            ["--index", str(tmp_path), "--index-path", str(database_path)],
+            [
+                "--index",
+                str(tmp_path),
+                "--yes",
+                "--index-path",
+                str(database_path),
+            ],
             image_embedding_factory=ColorCliEmbedding,
         )
         == 0

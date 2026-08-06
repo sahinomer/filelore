@@ -22,12 +22,13 @@ from rich.progress import (
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
+from rich.prompt import Confirm
 from rich.rule import Rule
 from rich.style import Style
-from rich.table import Table
+from rich.table import Column, Table
 from rich.text import Text
 
-from filelore.index import FileSearchResult, FileSegmentMatch
+from filelore.index import FileSearchResult, FileSegmentMatch, IndexWorkPlan
 
 
 class ProcessingRateColumn(ProgressColumn):
@@ -83,7 +84,11 @@ class CliDisplay:
 
     @contextmanager
     def indexing(
-        self, total: int, *, label: str = "Indexing files"
+        self,
+        total: int,
+        *,
+        label: str = "Indexing files",
+        label_width: int | None = None,
     ) -> Iterator[IndexingProgress]:
         """Display determinate per-file indexing progress when there is work."""
         if total == 0:
@@ -91,7 +96,10 @@ class CliDisplay:
             return
 
         progress = Progress(
-            TextColumn("{task.description}"),
+            TextColumn(
+                "{task.description}",
+                table_column=Column(width=label_width, no_wrap=True),
+            ),
             BarColumn(),
             MofNCompleteColumn(),
             TaskProgressColumn(),
@@ -107,6 +115,51 @@ class CliDisplay:
                 yield IndexingProgress(progress, task_id)
         finally:
             self._active_progress = None
+
+    def confirm(self, message: str, *, default: bool = True) -> bool:
+        """Ask a terminal confirmation question on the diagnostic stream."""
+        return Confirm.ask(message, console=self._console, default=default)
+
+    def print_index_discovery(self, plan: IndexWorkPlan) -> None:
+        """Display aligned new, changed, and unchanged discovery counts."""
+        if not plan.queues:
+            self._console.print("Discovery complete: no supported files found")
+            return
+
+        self._console.print("Discovery complete")
+        labels = tuple(
+            f"{queue.file_type.title()} files" for queue in plan.queues
+        )
+        label_width = max(len(label) for label in labels)
+        for queue, label in zip(plan.queues, labels):
+            details = (
+                f"{queue.discovered_count} found  •  "
+                f"{queue.new_count} new  •  "
+                f"{queue.updated_count} changed  •  "
+                f"{queue.unchanged_count} unchanged"
+            )
+            if queue.failures:
+                details += f"  •  {len(queue.failures)} unreadable"
+            self._console.print(f"  {label:<{label_width}}  {details}")
+
+    def print_index_result(
+        self,
+        file_type: str,
+        *,
+        added: int,
+        updated: int,
+        failed: int,
+    ) -> None:
+        """Display successful and failed work for one file type."""
+        self._console.print(
+            f"{file_type.title()} files: {added} added  •  "
+            f"{updated} updated  •  {failed} failed"
+        )
+
+    def print_skipped(self, file_type: str, count: int) -> None:
+        """Report a declined work queue without treating it as an error."""
+        file_label = "file" if count == 1 else "files"
+        self._console.print(f"Skipped {count} {file_type} {file_label}")
 
     @contextmanager
     def suspend(self) -> Iterator[None]:

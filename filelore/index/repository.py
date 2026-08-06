@@ -103,11 +103,24 @@ class FileIndexRepository:
         return self.store_prepared_many((prepared_file,))[0]
 
     def store_prepared_many(
-        self, prepared_files: Sequence[PreparedFile]
+        self,
+        prepared_files: Sequence[PreparedFile],
+        *,
+        content_hashes: Sequence[str] | None = None,
     ) -> tuple[FileIndexEntry, ...]:
         """Persist processor results, including child segment vectors."""
         if not prepared_files:
             return ()
+        if content_hashes is None:
+            prepared_hashes: Sequence[str | None] = [None] * len(
+                prepared_files
+            )
+        else:
+            if len(content_hashes) != len(prepared_files):
+                raise ValueError(
+                    "content_hashes must match the number of prepared files"
+                )
+            prepared_hashes = content_hashes
         if (
             any(item.segments for item in prepared_files)
             and not self._segments_configured
@@ -119,12 +132,15 @@ class FileIndexRepository:
         entries: list[FileIndexEntry] = []
         parent_records: list[VectorRecord] = []
         segment_records: list[VectorRecord] = []
-        for prepared_file in prepared_files:
+        for prepared_file, content_hash in zip(
+            prepared_files, prepared_hashes
+        ):
             self._validate_segments(prepared_file.segments)
             entry, parent_record = self._prepare_record(
                 prepared_file.metadata,
                 vectors=prepared_file.vectors,
                 segment_count=len(prepared_file.segments),
+                content_hash=content_hash,
             )
             entries.append(entry)
             parent_records.append(parent_record)
@@ -157,9 +173,10 @@ class FileIndexRepository:
         *,
         vectors: Mapping[str, Sequence[float]] | None,
         segment_count: int = 0,
+        content_hash: str | None = None,
     ) -> tuple[FileIndexEntry, VectorRecord]:
         path = metadata.path.resolve()
-        content_hash = calculate_file_hash(path)
+        resolved_content_hash = content_hash or calculate_file_hash(path)
         indexed_at = datetime.now(timezone.utc)
         point_id = file_point_id(path)
         metadata_dict = metadata.to_dict()
@@ -170,7 +187,7 @@ class FileIndexRepository:
             "path_key": normalized_path(path),
             "file_name": path.name,
             "file_name_search": path.name.casefold(),
-            "content_hash": content_hash,
+            "content_hash": resolved_content_hash,
             "hash_algorithm": "sha256",
             "file_type": metadata.file_type,
             "extension": metadata.extension,
@@ -185,7 +202,7 @@ class FileIndexRepository:
         entry = FileIndexEntry(
             id=point_id,
             path=path,
-            content_hash=content_hash,
+            content_hash=resolved_content_hash,
             file_type=metadata.file_type,
             metadata=metadata_dict,
             indexed_at=indexed_at,
@@ -239,6 +256,28 @@ class FileIndexRepository:
             self.collection_name, [file_point_id(path)], with_vectors=False
         )
         return self._to_entry(records[0]) if records else None
+
+    def get_by_paths(
+        self,
+        paths: Sequence[str | Path],
+        *,
+        batch_size: int = 1_000,
+    ) -> tuple[FileIndexEntry | None, ...]:
+        """Retrieve path records in input order with no per-file round trips."""
+        if batch_size < 1:
+            raise ValueError("Path lookup batch size must be positive")
+        point_ids = tuple(file_point_id(path) for path in paths)
+        entries_by_id: dict[str, FileIndexEntry] = {}
+        for start in range(0, len(point_ids), batch_size):
+            records = self.database.retrieve(
+                self.collection_name,
+                point_ids[start : start + batch_size],
+                with_vectors=False,
+            )
+            entries_by_id.update(
+                (record.id, self._to_entry(record)) for record in records
+            )
+        return tuple(entries_by_id.get(point_id) for point_id in point_ids)
 
     def find_by_hash(
         self, content_hash: str, *, limit: int = 100

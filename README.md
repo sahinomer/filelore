@@ -52,8 +52,16 @@ uv run python -m filelore --index /path/to/files
 
 FileLore scans directories recursively and stores its local index under
 `~/.filelore/qdrant` by default. Discovery groups images and audio into
-separate queues, then loads only one required embedding model at a time. Limit
-indexing to a specific type when desired:
+separate queues. It hashes discovered files before loading a model, skips
+unchanged content, and processes only new or changed files. Each non-empty
+queue is confirmed separately, and only one required embedding model is loaded
+at a time. Use `-y` / `--yes` to accept every queue without prompting:
+
+```sh
+uv run python -m filelore --index /path/to/files --yes
+```
+
+Limit indexing to a specific type when desired:
 
 ```sh
 uv run python -m filelore --index /path/to/files --index-type audio

@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 from contextlib import ExitStack
+from dataclasses import dataclass
 from datetime import date, datetime, time
 from pathlib import Path
 from time import perf_counter
@@ -26,8 +27,9 @@ from filelore.index import (
     FileMetadataQuery,
     IndexCoordinator,
     IndexHandler,
-    IndexQueue,
+    IndexWorkQueue,
     file_metadata_filter,
+    normalized_path,
 )
 from filelore.metadata import AudioMetadataParser, ImageMetadataParser
 from filelore.processors import AudioProcessor, ImageProcessor
@@ -41,6 +43,19 @@ InteractiveRunner = Callable[[FileIndexRepository, ImageEmbedding, int], int]
 DEFAULT_INDEX_PATH = Path.home() / ".filelore" / "qdrant"
 DEFAULT_BATCH_SIZE = 100
 DEFAULT_RESULT_LIMIT = 50
+
+
+@dataclass(frozen=True, slots=True)
+class IndexQueueOutcome:
+    """Successful and failed records from one confirmed work queue."""
+
+    added: int = 0
+    updated: int = 0
+    failed: int = 0
+
+    @property
+    def had_errors(self) -> bool:
+        return self.failed > 0
 
 
 def configured_qdrant_url() -> str | None:
@@ -170,6 +185,13 @@ def build_argument_parser() -> argparse.ArgumentParser:
             f"(default: {DEFAULT_BATCH_SIZE})"
         ),
     )
+    index_options.add_argument(
+        "-y",
+        "--yes",
+        dest="assume_yes",
+        action="store_true",
+        help="index all new and changed files without confirmation",
+    )
 
     storage_options = parser.add_argument_group("storage options")
     storage_options.add_argument(
@@ -257,6 +279,7 @@ def main(
             args.no_recursive
             or args.batch_size is not None
             or args.index_types is not None
+            or args.assume_yes
         ):
             display.print_error("Index options require --index")
             return 2
@@ -309,6 +332,7 @@ def main(
             args.no_recursive
             or args.batch_size is not None
             or args.index_types is not None
+            or args.assume_yes
         ):
             display.print_error("Index options require --index")
             return 2
@@ -349,6 +373,7 @@ def main(
                     recursive=not args.no_recursive,
                     batch_size=batch_size,
                     allowed_types=args.index_types,
+                    assume_yes=args.assume_yes,
                     coordinator=coordinator,
                     display=display,
                 )
@@ -454,6 +479,13 @@ def _is_interactive_terminal() -> bool:
         return False
 
 
+def _can_prompt() -> bool:
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
 def _run_interactive_search(
     file_index: FileIndexRepository,
     embedding: ImageEmbedding,
@@ -508,6 +540,7 @@ def _index_directory(
     recursive: bool,
     batch_size: int,
     allowed_types: Sequence[str] | None,
+    assume_yes: bool,
     coordinator: IndexCoordinator,
     display: CliDisplay,
 ) -> int:
@@ -518,8 +551,47 @@ def _index_directory(
             allowed_types=allowed_types,
         )
 
+    progress_labels = (
+        "Checking file changes",
+        *(f"Indexing {queue.file_type} files" for queue in plan.queues),
+    )
+    progress_label_width = max(len(label) for label in progress_labels)
+    repository = FileIndexRepository(database)
+    with display.indexing(
+        plan.total_files,
+        label="Checking file changes",
+        label_width=progress_label_width,
+    ) as progress:
+        work_plan = coordinator.classify_changes(
+            plan,
+            repository,
+            on_progress=progress.advance,
+        )
+
+    display.print_index_discovery(work_plan)
     had_errors = False
-    for queue in plan.queues:
+    for queue in work_plan.queues:
+        if queue.failures:
+            had_errors = True
+            for failure in queue.failures:
+                display.print_error(
+                    f"Could not inspect {failure.path}: {failure.error}"
+                )
+
+    if work_plan.work_count and not assume_yes and not _can_prompt():
+        display.print_error(
+            "Indexing requires confirmation in a terminal; rerun with --yes"
+        )
+        return 2
+
+    for queue in work_plan.queues:
+        if not queue.candidates:
+            continue
+        if not assume_yes and not display.confirm(
+            _index_confirmation_message(queue)
+        ):
+            display.print_skipped(queue.file_type, queue.work_count)
+            continue
         try:
             with ExitStack() as model_session:
                 with display.status(
@@ -528,12 +600,20 @@ def _index_directory(
                     file_indexer = model_session.enter_context(
                         queue.handler.open_indexer(database)
                     )
-                had_errors |= _index_queue(
+                outcome = _index_queue(
                     file_indexer,
                     queue,
                     batch_size=batch_size,
                     coordinator=coordinator,
                     display=display,
+                    label_width=progress_label_width,
+                )
+                had_errors |= outcome.had_errors
+                display.print_index_result(
+                    queue.file_type,
+                    added=outcome.added,
+                    updated=outcome.updated,
+                    failed=outcome.failed,
                 )
         except (EOFError, KeyboardInterrupt):
             raise
@@ -545,31 +625,59 @@ def _index_directory(
     return 1 if had_errors else 0
 
 
+def _index_confirmation_message(queue: IndexWorkQueue) -> str:
+    file_label = "file" if queue.work_count == 1 else "files"
+    details: list[str] = []
+    if queue.new_count:
+        details.append(f"{queue.new_count} new")
+    if queue.updated_count:
+        details.append(f"{queue.updated_count} changed")
+    return (
+        f"Index {queue.work_count} {queue.file_type} {file_label} "
+        f"({', '.join(details)})?"
+    )
+
+
 def _index_queue(
     file_indexer: FileIndexer[Any],
-    queue: IndexQueue,
+    queue: IndexWorkQueue,
     *,
     batch_size: int,
     coordinator: IndexCoordinator,
     display: CliDisplay,
-) -> bool:
-    had_errors = False
+    label_width: int,
+) -> IndexQueueOutcome:
+    added = 0
+    updated = 0
+    failed = 0
     with display.indexing(
-        len(queue.paths), label=f"Indexing {queue.file_type} files"
+        queue.work_count,
+        label=f"Indexing {queue.file_type} files",
+        label_width=label_width,
     ) as progress:
-        for paths in coordinator.batches(queue, batch_size):
+        for candidates in coordinator.work_batches(queue, batch_size):
             try:
-                result = file_indexer.index_batch(paths)
+                result = file_indexer.index_candidates(candidates)
+                indexed_paths = {
+                    normalized_path(entry.path) for entry in result.entries
+                }
+                for candidate in candidates:
+                    if normalized_path(candidate.path) not in indexed_paths:
+                        continue
+                    if candidate.change == "new":
+                        added += 1
+                    else:
+                        updated += 1
                 if result.failures:
-                    had_errors = True
+                    failed += len(result.failures)
                     with display.suspend():
                         for failure in result.failures:
                             display.print_error(
                                 f"Could not index {failure.path}: {failure.error}"
                             )
             finally:
-                progress.advance(len(paths))
-    return had_errors
+                progress.advance(len(candidates))
+    return IndexQueueOutcome(added=added, updated=updated, failed=failed)
 
 
 def _metadata_query(args: argparse.Namespace) -> FileMetadataQuery:

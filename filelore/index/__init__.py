@@ -23,11 +23,14 @@ from filelore.index.models import (
 from filelore.index.pipeline import (
     FileIndexer,
     FileProcessor,
+    IndexCandidate,
     IndexCoordinator,
     IndexHandler,
     IndexingBatch,
     IndexPlan,
     IndexQueue,
+    IndexWorkPlan,
+    IndexWorkQueue,
 )
 from filelore.index.repository import FileIndexRepository
 
@@ -42,11 +45,14 @@ __all__ = [
     "FileSegmentMatch",
     "FileProcessor",
     "FileSearchResult",
+    "IndexCandidate",
     "IndexCoordinator",
     "IndexHandler",
     "IndexingBatch",
     "IndexPlan",
     "IndexQueue",
+    "IndexWorkPlan",
+    "IndexWorkQueue",
     "calculate_file_hash",
     "file_metadata_filter",
     "file_point_id",
