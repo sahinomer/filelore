@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import wave
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
@@ -16,7 +17,7 @@ from filelore.index import (
     file_point_id,
     file_segment_point_id,
 )
-from filelore.metadata import AudioMetadataParser
+from filelore.metadata import AudioMetadata, AudioMetadataParser
 from filelore.processors import AudioProcessor, PreparedFile, PreparedSegment
 from filelore.storage import DistanceMetric, VectorConfig
 from filelore.storage.qdrant import QdrantVectorDatabase
@@ -78,6 +79,51 @@ def segment_config() -> dict[str, VectorConfig]:
     return {
         "audio_test": VectorConfig(3, distance=DistanceMetric.COSINE),
     }
+
+
+@pytest.mark.parametrize(
+    ("extension", "file_format"),
+    (
+        ("aif", "aif"),
+        ("aif", "aiff"),
+        ("aiff", "aif"),
+        ("aiff", "aiff"),
+        ("wav", "wav"),
+        ("wav", "wave"),
+        ("wave", "wav"),
+        ("wave", "wave"),
+    ),
+)
+def test_audio_format_filter_normalizes_extension_aliases(
+    tmp_path: Path,
+    extension: str,
+    file_format: str,
+) -> None:
+    audio_path = tmp_path / f"effect.{extension}"
+    audio_path.write_bytes(b"audio placeholder")
+    metadata = AudioMetadata(
+        path=audio_path,
+        extension=f".{extension}",
+        mime_type=None,
+        size_bytes=audio_path.stat().st_size,
+        modified_at=datetime.now(timezone.utc),
+        duration_seconds=1.0,
+        sample_rate_hz=48_000,
+        channels=2,
+        bitrate_bps=192_000,
+        bits_per_sample=16,
+        audio_format=extension.upper(),
+    )
+
+    with QdrantVectorDatabase(tmp_path / "database") as database:
+        repository = FileIndexRepository(database)
+        repository.store(metadata)
+
+        results = repository.search_files(
+            FileMetadataQuery(file_format=file_format)
+        )
+
+    assert [result.path for result in results] == [audio_path.resolve()]
 
 
 def test_file_indexer_processes_audio_and_stores_timed_child_points(

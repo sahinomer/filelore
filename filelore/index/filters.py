@@ -13,9 +13,11 @@ from filelore.storage import (
 def normalize_file_format(value: str) -> str:
     format_key = value.strip().removeprefix(".").casefold()
     return {
+        "aif": "aiff",
         "jpg": "jpeg",
         "jfif": "jpeg",
         "tif": "tiff",
+        "wave": "wav",
     }.get(format_key, format_key)
 
 

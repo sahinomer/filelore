@@ -163,7 +163,6 @@ class FileIndexRepository:
         indexed_at = datetime.now(timezone.utc)
         point_id = file_point_id(path)
         metadata_dict = metadata.to_dict()
-        detected_format = metadata_dict.get("image_format") or metadata.extension
         payload = {
             "schema_version": 1,
             "record_type": "file",
@@ -175,7 +174,7 @@ class FileIndexRepository:
             "hash_algorithm": "sha256",
             "file_type": metadata.file_type,
             "extension": metadata.extension,
-            "format_key": normalize_file_format(str(detected_format)),
+            "format_key": normalize_file_format(metadata.extension),
             "mime_type": metadata.mime_type,
             "size_bytes": metadata.size_bytes,
             "modified_at": metadata.modified_at.isoformat(),
@@ -267,7 +266,7 @@ class FileIndexRepository:
     def search_files(
         self, query: FileMetadataQuery, *, limit: int = 50
     ) -> tuple[FileIndexEntry, ...]:
-        """Search common file and image fields, ignoring unspecified values."""
+        """Search common file and media fields, ignoring unspecified values."""
         return self.search_metadata(file_metadata_filter(query), limit=limit)
 
     def semantic_search(

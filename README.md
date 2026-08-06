@@ -27,7 +27,7 @@ Clone the repository, enter its directory, and synchronize the environment:
 uv sync --extra embedding
 ```
 
-The embedding model is downloaded when it is used for the first time.
+Each embedding model is downloaded when it is used for the first time.
 
 ## Tests
 
