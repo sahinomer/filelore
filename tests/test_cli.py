@@ -252,7 +252,7 @@ def test_cli_indexing_emits_only_expected_progress_feedback(
             "--batch-size",
             "1",
         ],
-        embedding_factory=ColorCliEmbedding,
+        image_embedding_factory=ColorCliEmbedding,
     )
 
     captured = capsys.readouterr()
@@ -262,7 +262,7 @@ def test_cli_indexing_emits_only_expected_progress_feedback(
     assert len(stderr_lines) == 3
     assert stderr_lines[0].startswith("Discovering supported files")
     assert stderr_lines[1].startswith("Initializing image model")
-    assert stderr_lines[2].startswith("Indexing images")
+    assert stderr_lines[2].startswith("Indexing image files")
     assert "2/2" in stderr_lines[2]
     assert "100%" in stderr_lines[2]
 
@@ -285,7 +285,7 @@ def test_cli_failed_files_still_complete_progress(
             "--index-path",
             str(tmp_path / "qdrant-index"),
         ],
-        embedding_factory=ColorCliEmbedding,
+        image_embedding_factory=ColorCliEmbedding,
     )
 
     captured = capsys.readouterr()
@@ -310,14 +310,14 @@ def test_cli_empty_discovery_has_no_incomplete_progress_bar(
             "--index-path",
             str(tmp_path / "qdrant-index"),
         ],
-        embedding_factory=ColorCliEmbedding,
+        image_embedding_factory=ColorCliEmbedding,
     )
 
     captured = capsys.readouterr()
     assert exit_code == 0
     assert captured.out == ""
     assert "Discovering supported files" in captured.err
-    assert "Indexing images" not in captured.err
+    assert "Indexing image files" not in captured.err
     assert "0%" not in captured.err
 
 
@@ -336,7 +336,7 @@ def test_cli_reports_invalid_images_and_indexes_the_remaining_files(
             "--index-path",
             str(tmp_path / "qdrant-index"),
         ],
-        embedding_factory=ColorCliEmbedding,
+        image_embedding_factory=ColorCliEmbedding,
     )
 
     captured = capsys.readouterr()
@@ -379,7 +379,7 @@ def test_cli_smart_indexing_loads_models_sequentially(
             "--index-path",
             str(database_path),
         ],
-        embedding_factory=image_factory,
+        image_embedding_factory=image_factory,
         audio_embedding_factory=audio_factory,
     )
 
@@ -417,7 +417,7 @@ def test_cli_index_type_ignores_other_queues_without_loading_their_model(
             "--index-path",
             str(database_path),
         ],
-        embedding_factory=ColorCliEmbedding,
+        image_embedding_factory=ColorCliEmbedding,
         audio_embedding_factory=unexpected_audio_factory,
     )
 
@@ -427,6 +427,39 @@ def test_cli_index_type_ignores_other_queues_without_loading_their_model(
         assert repository.count() == 1
         assert repository.get_by_path(image_path) is not None
         assert repository.get_by_path(audio_path) is None
+
+
+def test_cli_audio_index_type_does_not_load_the_image_model(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "qdrant-index"
+    image_path = tmp_path / "photo.png"
+    audio_path = tmp_path / "effect.wav"
+    create_image(image_path)
+    create_wave(audio_path)
+
+    def unexpected_image_factory() -> ColorCliEmbedding:
+        raise AssertionError("Image model must remain unloaded")
+
+    exit_code = main(
+        [
+            "--index",
+            str(tmp_path),
+            "--index-type",
+            "audio",
+            "--index-path",
+            str(database_path),
+        ],
+        image_embedding_factory=unexpected_image_factory,
+        audio_embedding_factory=AudioCliEmbedding,
+    )
+
+    assert exit_code == 0
+    with QdrantVectorDatabase(database_path) as database:
+        repository = FileIndexRepository(database)
+        assert repository.count() == 1
+        assert repository.get_by_path(image_path) is None
+        assert repository.get_by_path(audio_path) is not None
 
 
 def test_cli_continues_other_queues_after_a_model_load_failure(
@@ -449,7 +482,7 @@ def test_cli_continues_other_queues_after_a_model_load_failure(
             "--index-path",
             str(database_path),
         ],
-        embedding_factory=failing_image_factory,
+        image_embedding_factory=failing_image_factory,
         audio_embedding_factory=AudioCliEmbedding,
     )
 
@@ -561,7 +594,7 @@ def test_cli_without_arguments_opens_interactive_search_on_a_terminal(
     factory_calls: list[ColorCliEmbedding] = []
     runner_calls: list[tuple[ColorCliEmbedding, int]] = []
 
-    def embedding_factory() -> ColorCliEmbedding:
+    def image_embedding_factory() -> ColorCliEmbedding:
         embedding = ColorCliEmbedding()
         factory_calls.append(embedding)
         return embedding
@@ -580,7 +613,7 @@ def test_cli_without_arguments_opens_interactive_search_on_a_terminal(
 
     exit_code = main(
         [],
-        embedding_factory=embedding_factory,
+        image_embedding_factory=image_embedding_factory,
         interactive_runner=interactive_runner,  # type: ignore[arg-type]
     )
 
@@ -650,7 +683,7 @@ def test_cli_searches_with_optional_metadata_filters(
                 "--index-path",
                 str(database_path),
             ],
-            embedding_factory=ColorCliEmbedding,
+            image_embedding_factory=ColorCliEmbedding,
         )
         == 0
     )
@@ -674,7 +707,7 @@ def test_cli_searches_with_optional_metadata_filters(
             "--modified-before",
             "2100-01-01",
         ],
-        embedding_factory=ColorCliEmbedding,
+        image_embedding_factory=ColorCliEmbedding,
     )
 
     captured = capsys.readouterr()
@@ -711,14 +744,14 @@ def test_cli_indexes_embeddings_and_searches_by_semantic_description(
             "--index-path",
             str(database_path),
         ],
-        embedding_factory=ColorCliEmbedding,
+        image_embedding_factory=ColorCliEmbedding,
     )
 
     assert exit_code == 0
     assert capsys.readouterr().out == ""
     exit_code = main(
         ["red", "--index-path", str(database_path), "--target", "image"],
-        embedding_factory=ColorCliEmbedding,
+        image_embedding_factory=ColorCliEmbedding,
     )
 
     captured = capsys.readouterr()
@@ -801,7 +834,7 @@ def test_cli_shows_search_model_initialization_on_stderr(
                 "--index-path",
                 str(database_path),
             ],
-            embedding_factory=ColorCliEmbedding,
+            image_embedding_factory=ColorCliEmbedding,
         )
         == 0
     )
@@ -809,7 +842,7 @@ def test_cli_shows_search_model_initialization_on_stderr(
 
     exit_code = main(
         ["red", "--target", "image", "--index-path", str(database_path)],
-        embedding_factory=ColorCliEmbedding,
+        image_embedding_factory=ColorCliEmbedding,
     )
 
     captured = capsys.readouterr()
@@ -836,7 +869,7 @@ def test_cli_search_uses_score_colors_in_terminal(
     assert (
         main(
             ["--index", str(tmp_path), "--index-path", str(database_path)],
-            embedding_factory=ColorCliEmbedding,
+            image_embedding_factory=ColorCliEmbedding,
         )
         == 0
     )
@@ -846,7 +879,7 @@ def test_cli_search_uses_score_colors_in_terminal(
     monkeypatch.setattr(sys, "stdout", terminal_stdout)
     exit_code = main(
         ["red", "--target", "image", "--index-path", str(database_path)],
-        embedding_factory=ColorCliEmbedding,
+        image_embedding_factory=ColorCliEmbedding,
     )
 
     rendered = terminal_stdout.getvalue()

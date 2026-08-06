@@ -83,7 +83,7 @@ class CliDisplay:
 
     @contextmanager
     def indexing(
-        self, total: int, *, label: str = "Indexing images"
+        self, total: int, *, label: str = "Indexing files"
     ) -> Iterator[IndexingProgress]:
         """Display determinate per-file indexing progress when there is work."""
         if total == 0:
@@ -179,7 +179,14 @@ def search_results_renderable(
                 _match_text(relative_score),
             )
             table.add_row("", _directory_text(path.parent), "")
-            table.add_row("", _details_text(result.file.metadata), "")
+            table.add_row(
+                "",
+                _details_text(
+                    result.file.metadata,
+                    file_type=result.file.file_type,
+                ),
+                "",
+            )
             if result.segment is not None:
                 table.add_row("", _segment_text(result.segment), "")
             table.add_row("", _modified_text(result.file.metadata), "")
@@ -252,13 +259,10 @@ def _directory_text(directory: Path) -> Text:
     return text
 
 
-def _details_text(metadata: dict[str, Any]) -> Text:
+def _details_text(metadata: dict[str, Any], *, file_type: str) -> Text:
     details: list[str] = []
-    is_audio = "audio_format" in metadata or "duration_seconds" in metadata
-    media_format = (
-        metadata.get("audio_format")
-        or metadata.get("image_format")
-        or metadata.get("extension")
+    media_format = metadata.get(f"{file_type}_format") or metadata.get(
+        "extension"
     )
     if media_format:
         details.append(str(media_format).lstrip(".").upper())
@@ -301,7 +305,8 @@ def _details_text(metadata: dict[str, Any]) -> Text:
     if isinstance(frame_count, int) and frame_count > 1:
         details.append(f"{frame_count:,} frames")
 
-    text = Text("Audio      " if is_audio else "Image      ", style="dim")
+    type_label = file_type.strip().title() or "File"
+    text = Text(f"{type_label:<11}", style="dim")
     text.append("  •  ".join(details) if details else "Details unavailable")
     return text
 

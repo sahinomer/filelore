@@ -9,7 +9,7 @@ from contextlib import ExitStack
 from datetime import date, datetime, time
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from filelore.cli_display import CliDisplay
 from filelore.embedding import (
@@ -34,9 +34,9 @@ from filelore.processors import AudioProcessor, ImageProcessor
 from filelore.storage import QdrantVectorDatabase, VectorDatabase
 
 
-EmbeddingFactory = Callable[[], ImageEmbedding]
+EmbeddingFactory = Callable[[], TextEmbedding[Any]]
+ImageEmbeddingFactory = Callable[[], ImageEmbedding]
 AudioEmbeddingFactory = Callable[[], AudioEmbedding]
-SearchEmbeddingFactory = Callable[[], TextEmbedding[Any]]
 InteractiveRunner = Callable[[FileIndexRepository, ImageEmbedding, int], int]
 DEFAULT_INDEX_PATH = Path.home() / ".filelore" / "qdrant"
 DEFAULT_BATCH_SIZE = 100
@@ -196,17 +196,21 @@ def build_argument_parser() -> argparse.ArgumentParser:
 def main(
     argv: Sequence[str] | None = None,
     *,
-    embedding_factory: EmbeddingFactory | None = None,
+    image_embedding_factory: ImageEmbeddingFactory | None = None,
     audio_embedding_factory: AudioEmbeddingFactory | None = None,
     interactive_runner: InteractiveRunner | None = None,
 ) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = build_argument_parser().parse_args(raw_argv)
     display = CliDisplay()
-    image_embedding_factory = embedding_factory or ClipImageEmbedding
-    selected_audio_embedding_factory = (
-        audio_embedding_factory or ClapAudioEmbedding
+    embedding_factories = _embedding_factories(
+        image=image_embedding_factory,
+        audio=audio_embedding_factory,
     )
+    index_handlers = _index_handlers(embedding_factories)
+    handlers_by_type = {
+        handler.file_type: handler for handler in index_handlers
+    }
     search_target: str | None = None
     semantic_query = (args.query or "").strip()
     interactive_terminal = _is_interactive_terminal()
@@ -338,12 +342,7 @@ def main(
             url=qdrant_url,
         ) as database:
             if args.index_directory is not None:
-                coordinator = IndexCoordinator(
-                    _index_handlers(
-                        image_embedding_factory=image_embedding_factory,
-                        audio_embedding_factory=selected_audio_embedding_factory,
-                    )
-                )
+                coordinator = IndexCoordinator(index_handlers)
                 return _index_directory(
                     database,
                     args.index_directory,
@@ -356,7 +355,12 @@ def main(
             file_index = FileIndexRepository(database)
             if interactive_mode:
                 with display.status("Initializing image model…"):
-                    embedding = image_embedding_factory()
+                    embedding = embedding_factories["image"]()
+                if not isinstance(embedding, ImageEmbedding):
+                    embedding.close()
+                    raise TypeError(
+                        "Interactive search requires an image embedding"
+                    )
                 runner = interactive_runner or _run_interactive_search
                 return runner(file_index, embedding, result_limit)
             assert metadata_query is not None
@@ -366,12 +370,7 @@ def main(
                 semantic_query,
                 metadata_query,
                 result_limit,
-                search_target,
-                _embedding_factory_for_target(
-                    search_target,
-                    image_override=embedding_factory,
-                    audio_override=audio_embedding_factory,
-                ),
+                handlers_by_type[search_target],
                 display,
             )
     except (EOFError, KeyboardInterrupt):
@@ -384,17 +383,16 @@ def main(
         return 2
 
 
-def _embedding_factory_for_target(
-    target: str,
+def _embedding_factories(
     *,
-    image_override: EmbeddingFactory | None = None,
-    audio_override: AudioEmbeddingFactory | None = None,
-) -> SearchEmbeddingFactory:
-    if target == "image":
-        return image_override or ClipImageEmbedding
-    if target == "audio":
-        return audio_override or ClapAudioEmbedding
-    raise ValueError(f"Unsupported embedding target: {target}")
+    image: ImageEmbeddingFactory | None = None,
+    audio: AudioEmbeddingFactory | None = None,
+) -> dict[str, EmbeddingFactory]:
+    """Return the enabled default target-to-model factory registry."""
+    return {
+        "image": image or ClipImageEmbedding,
+        "audio": audio or ClapAudioEmbedding,
+    }
 
 
 def _resolve_search_target(
@@ -467,22 +465,20 @@ def _run_interactive_search(
 
 
 def _index_handlers(
-    *,
-    image_embedding_factory: EmbeddingFactory,
-    audio_embedding_factory: AudioEmbeddingFactory,
+    embedding_factories: Mapping[str, EmbeddingFactory],
 ) -> tuple[IndexHandler, ...]:
     return (
         IndexHandler(
             file_type="image",
             extensions=ImageMetadataParser.supported_extensions,
-            embedding_factory=image_embedding_factory,
+            embedding_factory=embedding_factories["image"],
             processor_factory=_image_processor_for,
             vector_scope="file",
         ),
         IndexHandler(
             file_type="audio",
             extensions=AudioMetadataParser.supported_extensions,
-            embedding_factory=audio_embedding_factory,
+            embedding_factory=embedding_factories["audio"],
             processor_factory=_audio_processor_for,
             vector_scope="segment",
         ),
@@ -558,9 +554,8 @@ def _index_queue(
     display: CliDisplay,
 ) -> bool:
     had_errors = False
-    label = "images" if queue.file_type == "image" else f"{queue.file_type} files"
     with display.indexing(
-        len(queue.paths), label=f"Indexing {label}"
+        len(queue.paths), label=f"Indexing {queue.file_type} files"
     ) as progress:
         for paths in coordinator.batches(queue, batch_size):
             try:
@@ -642,28 +637,30 @@ def _search(
     semantic_query: str,
     metadata_query: FileMetadataQuery,
     limit: int,
-    target: str,
-    embedding_factory: SearchEmbeddingFactory,
+    handler: IndexHandler,
     display: CliDisplay,
 ) -> int:
     total_started = perf_counter()
 
     initialization_started = perf_counter()
-    with display.status(f"Initializing {target} model…"):
-        embedding = embedding_factory()
+    with display.status(f"Initializing {handler.file_type} model…"):
+        embedding = handler.embedding_factory()
     initialization_ms = (perf_counter() - initialization_started) * 1000
 
     try:
+        if not isinstance(embedding, TextEmbedding):
+            raise TypeError(
+                f"{handler.file_type.title()} search requires a text embedding"
+            )
         embedding_started = perf_counter()
         query_vector = embedding.predict_text(semantic_query)
         embedding_ms = (perf_counter() - embedding_started) * 1000
 
         fetch_started = perf_counter()
-        search = (
-            file_index.semantic_segment_search
-            if target == "audio"
-            else file_index.semantic_search
-        )
+        search = {
+            "file": file_index.semantic_search,
+            "segment": file_index.semantic_segment_search,
+        }[handler.vector_scope]
         results = search(
             query_vector,
             vector_name=embedding.vector_name,
