@@ -19,7 +19,15 @@ from filelore.index.models import (
     FileMetadataQuery,
     FileSearchResult,
 )
-from filelore.index.pipeline import FileIndexer, FileProcessor, IndexingBatch
+from filelore.index.pipeline import (
+    FileIndexer,
+    FileProcessor,
+    IndexCoordinator,
+    IndexHandler,
+    IndexingBatch,
+    IndexPlan,
+    IndexQueue,
+)
 from filelore.index.repository import FileIndexRepository
 
 __all__ = [
@@ -32,7 +40,11 @@ __all__ = [
     "FileMetadataQuery",
     "FileProcessor",
     "FileSearchResult",
+    "IndexCoordinator",
+    "IndexHandler",
     "IndexingBatch",
+    "IndexPlan",
+    "IndexQueue",
     "calculate_file_hash",
     "file_metadata_filter",
     "file_point_id",

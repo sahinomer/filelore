@@ -215,6 +215,80 @@ def test_clip_embeds_single_and_batch_images_and_text(
     blue_image.close()
 
 
+def test_clip_close_releases_model_and_processor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        clip,
+        "_load_clip_backend",
+        lambda model_id, use_fast_processor: (
+            FakeTorch(),
+            FakeProcessor(),
+            FakeModel(),
+        ),
+    )
+    embedding = ClipImageEmbedding()
+
+    embedding.close()
+    embedding.close()
+
+    assert embedding._model is None
+    assert embedding._processor is None
+
+
+def test_clip_close_skips_exposed_but_unavailable_mps_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch_module = FakeTorch()
+    cache_calls: list[str] = []
+    torch_module.mps = SimpleNamespace(
+        empty_cache=lambda: cache_calls.append("mps")
+    )
+    monkeypatch.setattr(
+        clip,
+        "_load_clip_backend",
+        lambda model_id, use_fast_processor: (
+            torch_module,
+            FakeProcessor(),
+            FakeModel(),
+        ),
+    )
+    embedding = ClipImageEmbedding()
+
+    embedding.close()
+
+    assert embedding.device == "cpu"
+    assert cache_calls == []
+
+
+def test_clip_close_ignores_cache_cleanup_runtime_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def failing_empty_cache() -> None:
+        raise RuntimeError("cache backend unavailable")
+
+    torch_module = FakeTorch()
+    torch_module.cuda = SimpleNamespace(
+        is_available=lambda: True,
+        empty_cache=failing_empty_cache,
+    )
+    monkeypatch.setattr(
+        clip,
+        "_load_clip_backend",
+        lambda model_id, use_fast_processor: (
+            torch_module,
+            FakeProcessor(),
+            FakeModel(),
+        ),
+    )
+    embedding = ClipImageEmbedding()
+
+    embedding.close()
+
+    assert embedding.device == "cuda"
+    assert embedding._model is None
+
+
 def test_clip_rejects_ambiguous_batches_and_empty_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

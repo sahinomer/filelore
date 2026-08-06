@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import wave
 from io import StringIO
 from pathlib import Path
 from typing import Sequence
@@ -16,12 +17,29 @@ from filelore.cli import (
     main,
 )
 from filelore.cli_display import _directory_text, _format_modified_at
-from filelore.embedding import EmbeddingVector, ImageEmbedding
+from filelore.embedding import (
+    AudioEmbedding,
+    AudioInput,
+    EmbeddingVector,
+    ImageEmbedding,
+)
+from filelore.index import FileIndexRepository
+from filelore.storage import QdrantVectorDatabase
 
 
 def create_image(path: Path, *, size: tuple[int, int] = (12, 8)) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", size, color=(25, 50, 75)).save(path)
+
+
+def create_wave(path: Path, *, duration_seconds: float = 0.25) -> None:
+    sample_rate = 8_000
+    frame_count = round(duration_seconds * sample_rate)
+    with wave.open(str(path), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(sample_rate)
+        output.writeframes(b"\x00\x00" * frame_count)
 
 
 class ColorCliEmbedding(ImageEmbedding):
@@ -67,6 +85,29 @@ class ColorCliEmbedding(ImageEmbedding):
         )
 
 
+class AudioCliEmbedding(AudioEmbedding):
+    sampling_rate = 48_000
+    max_length_seconds = 10.0
+    batch_size = 2
+
+    def __init__(self) -> None:
+        super().__init__(
+            model_id="test-audio-model",
+            vector_name="audio_test",
+            dimensions=3,
+        )
+
+    def predict_batch(
+        self, items: Sequence[AudioInput]
+    ) -> tuple[EmbeddingVector, ...]:
+        return tuple((1.0, 0.0, 0.0) for _ in items)
+
+    def predict_text_batch(
+        self, texts: Sequence[str]
+    ) -> tuple[EmbeddingVector, ...]:
+        return tuple((1.0, 0.0, 0.0) for _ in texts)
+
+
 class TerminalStringIO(StringIO):
     def isatty(self) -> bool:
         return True
@@ -82,6 +123,15 @@ def test_cli_defaults_to_persistent_local_qdrant_index(
     assert args.qdrant_url is None
     assert args.index_path == DEFAULT_INDEX_PATH
     assert args.target == "image"
+    assert args.index_types is None
+
+
+def test_cli_accepts_repeatable_index_type_filters() -> None:
+    args = build_argument_parser().parse_args(
+        ["--index-type", "image", "--index-type", "audio"]
+    )
+
+    assert args.index_types == ["image", "audio"]
 
 
 def test_cli_accepts_qdrant_url_environment_override(
@@ -182,8 +232,8 @@ def test_cli_indexing_emits_only_expected_progress_feedback(
     assert captured.out == ""
     stderr_lines = captured.err.splitlines()
     assert len(stderr_lines) == 3
-    assert stderr_lines[0].startswith("Initializing image model")
-    assert stderr_lines[1].startswith("Discovering images")
+    assert stderr_lines[0].startswith("Discovering supported files")
+    assert stderr_lines[1].startswith("Initializing image model")
     assert stderr_lines[2].startswith("Indexing images")
     assert "2/2" in stderr_lines[2]
     assert "100%" in stderr_lines[2]
@@ -238,7 +288,7 @@ def test_cli_empty_discovery_has_no_incomplete_progress_bar(
     captured = capsys.readouterr()
     assert exit_code == 0
     assert captured.out == ""
-    assert "Discovering images" in captured.err
+    assert "Discovering supported files" in captured.err
     assert "Indexing images" not in captured.err
     assert "0%" not in captured.err
 
@@ -265,6 +315,123 @@ def test_cli_reports_invalid_images_and_indexes_the_remaining_files(
     assert exit_code == 1
     assert captured.out == ""
     assert f"Could not index {invalid_path}" in captured.err
+
+
+def test_cli_smart_indexing_loads_models_sequentially(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "qdrant-index"
+    image_path = tmp_path / "photo.png"
+    audio_path = tmp_path / "effect.wav"
+    create_image(image_path)
+    create_wave(audio_path)
+    lifecycle: list[str] = []
+
+    class TrackedImageEmbedding(ColorCliEmbedding):
+        def close(self) -> None:
+            lifecycle.append("image:close")
+
+    class TrackedAudioEmbedding(AudioCliEmbedding):
+        def close(self) -> None:
+            lifecycle.append("audio:close")
+
+    def image_factory() -> TrackedImageEmbedding:
+        lifecycle.append("image:load")
+        return TrackedImageEmbedding()
+
+    def audio_factory() -> TrackedAudioEmbedding:
+        assert lifecycle[-1] == "image:close"
+        lifecycle.append("audio:load")
+        return TrackedAudioEmbedding()
+
+    exit_code = main(
+        [
+            "--index",
+            str(tmp_path),
+            "--index-path",
+            str(database_path),
+        ],
+        embedding_factory=image_factory,
+        audio_embedding_factory=audio_factory,
+    )
+
+    assert exit_code == 0
+    assert lifecycle == [
+        "image:load",
+        "image:close",
+        "audio:load",
+        "audio:close",
+    ]
+    with QdrantVectorDatabase(database_path) as database:
+        repository = FileIndexRepository(database)
+        assert repository.count() == 2
+        assert database.count(repository.segment_collection_name) == 1
+
+
+def test_cli_index_type_ignores_other_queues_without_loading_their_model(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "qdrant-index"
+    image_path = tmp_path / "photo.png"
+    audio_path = tmp_path / "effect.wav"
+    create_image(image_path)
+    create_wave(audio_path)
+
+    def unexpected_audio_factory() -> AudioCliEmbedding:
+        raise AssertionError("Audio model must remain unloaded")
+
+    exit_code = main(
+        [
+            "--index",
+            str(tmp_path),
+            "--index-type",
+            "image",
+            "--index-path",
+            str(database_path),
+        ],
+        embedding_factory=ColorCliEmbedding,
+        audio_embedding_factory=unexpected_audio_factory,
+    )
+
+    assert exit_code == 0
+    with QdrantVectorDatabase(database_path) as database:
+        repository = FileIndexRepository(database)
+        assert repository.count() == 1
+        assert repository.get_by_path(image_path) is not None
+        assert repository.get_by_path(audio_path) is None
+
+
+def test_cli_continues_other_queues_after_a_model_load_failure(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database_path = tmp_path / "qdrant-index"
+    image_path = tmp_path / "photo.png"
+    audio_path = tmp_path / "effect.wav"
+    create_image(image_path)
+    create_wave(audio_path)
+
+    def failing_image_factory() -> ColorCliEmbedding:
+        raise RuntimeError("image model unavailable")
+
+    exit_code = main(
+        [
+            "--index",
+            str(tmp_path),
+            "--index-path",
+            str(database_path),
+        ],
+        embedding_factory=failing_image_factory,
+        audio_embedding_factory=AudioCliEmbedding,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Could not index image files: image model unavailable" in captured.err
+    with QdrantVectorDatabase(database_path) as database:
+        repository = FileIndexRepository(database)
+        assert repository.get_by_path(image_path) is None
+        assert repository.get_by_path(audio_path) is not None
 
 
 def test_cli_reports_a_missing_directory(
@@ -367,10 +534,15 @@ def test_cli_reports_an_invalid_resolution_filter(
     assert "Invalid minimum resolution" in captured.err
 
 
+@pytest.mark.parametrize(
+    "index_arguments",
+    (["--no-recursive"], ["--index-type", "audio"]),
+)
 def test_cli_rejects_index_options_during_search(
+    index_arguments: list[str],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    exit_code = main(["red", "--no-recursive"])
+    exit_code = main(["red", *index_arguments])
 
     captured = capsys.readouterr()
     assert exit_code == 2
@@ -504,7 +676,7 @@ def test_cli_shows_search_model_initialization_on_stderr(
     captured = capsys.readouterr()
     assert exit_code == 0
     assert "Initializing image model" in captured.err
-    assert "Discovering images" not in captured.err
+    assert "Discovering supported files" not in captured.err
     assert "Initializing image model" not in captured.out
     assert image_path.name in captured.out
     assert "Directory" in captured.out

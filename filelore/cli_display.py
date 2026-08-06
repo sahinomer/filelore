@@ -82,7 +82,9 @@ class CliDisplay:
             yield
 
     @contextmanager
-    def indexing(self, total: int) -> Iterator[IndexingProgress]:
+    def indexing(
+        self, total: int, *, label: str = "Indexing images"
+    ) -> Iterator[IndexingProgress]:
         """Display determinate per-file indexing progress when there is work."""
         if total == 0:
             yield IndexingProgress()
@@ -98,7 +100,7 @@ class CliDisplay:
             ProcessingRateColumn(),
             console=self._console,
         )
-        task_id = progress.add_task("Indexing images", total=total)
+        task_id = progress.add_task(label, total=total)
         self._active_progress = progress
         try:
             with progress:

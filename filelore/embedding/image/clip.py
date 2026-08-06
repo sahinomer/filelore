@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import re
 from contextlib import ExitStack
 from pathlib import Path
@@ -132,6 +133,15 @@ class ClipImageEmbedding(ImageEmbedding):
                 )
             )
         return tuple(vectors)
+
+    def close(self) -> None:
+        """Release model references and cached accelerator memory."""
+        if self._model is None:
+            return
+        self._model = None
+        self._processor = None
+        gc.collect()
+        self._clear_device_cache(self._torch, self.device)
 
     def _resolve_device(self, device: str) -> str:
         if device != "auto":

@@ -12,8 +12,8 @@ and retrieval under the user's control.
 - Combine semantic search with metadata filters.
 - Store indexes locally or in a configured Qdrant service.
 
-The current implementation starts with image indexing and text-to-image
-semantic search.
+The current implementation supports image and audio indexing, with
+text-to-image semantic search available through the CLI and TUI.
 
 ## Setup
 
@@ -50,7 +50,16 @@ uv run python -m filelore --index /path/to/files
 ```
 
 FileLore scans directories recursively and stores its local index under
-`~/.filelore/qdrant` by default. Run `uv run python -m filelore --help` to see
+`~/.filelore/qdrant` by default. Discovery groups images and audio into
+separate queues, then loads only one required embedding model at a time. Limit
+indexing to a specific type when desired:
+
+```sh
+uv run python -m filelore --index /path/to/files --index-type audio
+```
+
+Repeat `--index-type` to select multiple types. When it is omitted, all
+recognized types are indexed. Run `uv run python -m filelore --help` to see
 storage and indexing options.
 
 ## Search

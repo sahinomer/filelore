@@ -5,27 +5,36 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from contextlib import ExitStack
 from datetime import date, datetime, time
 from pathlib import Path
 from time import perf_counter
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 from filelore.cli_display import CliDisplay
-from filelore.embedding import ClipImageEmbedding, ImageEmbedding
+from filelore.embedding import (
+    AudioEmbedding,
+    BaseEmbedding,
+    ClapAudioEmbedding,
+    ClipImageEmbedding,
+    ImageEmbedding,
+)
 from filelore.index import (
     FileIndexRepository,
+    FileIndexer,
     FileMetadataQuery,
+    IndexCoordinator,
+    IndexHandler,
+    IndexQueue,
     file_metadata_filter,
 )
-from filelore.processors import ImageProcessor, PreparedFile
-from filelore.storage import (
-    DistanceMetric,
-    QdrantVectorDatabase,
-    VectorConfig,
-)
+from filelore.metadata import AudioMetadataParser, ImageMetadataParser
+from filelore.processors import AudioProcessor, ImageProcessor
+from filelore.storage import QdrantVectorDatabase, VectorDatabase
 
 
 EmbeddingFactory = Callable[[], ImageEmbedding]
+AudioEmbeddingFactory = Callable[[], AudioEmbedding]
 InteractiveRunner = Callable[[FileIndexRepository, ImageEmbedding, int], int]
 DEFAULT_INDEX_PATH = Path.home() / ".filelore" / "qdrant"
 DEFAULT_BATCH_SIZE = 100
@@ -39,7 +48,7 @@ def configured_qdrant_url() -> str | None:
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="filelore",
-        description="Search the FileLore index, or add images with --index."
+        description="Search the FileLore index, or add supported files with --index."
     )
     parser.add_argument(
         "query",
@@ -108,7 +117,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
         dest="index_directory",
         type=Path,
         metavar="DIRECTORY",
-        help="index images under DIRECTORY instead of searching",
+        help="index supported files under DIRECTORY instead of searching",
+    )
+    index_options.add_argument(
+        "--index-type",
+        dest="index_types",
+        action="append",
+        choices=("image", "audio"),
+        metavar="TYPE",
+        help=(
+            "only index this file type; repeat to select multiple types "
+            "(default: all supported types)"
+        ),
     )
     index_options.add_argument(
         "--no-recursive",
@@ -150,6 +170,7 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     embedding_factory: EmbeddingFactory | None = None,
+    audio_embedding_factory: AudioEmbeddingFactory | None = None,
     interactive_runner: InteractiveRunner | None = None,
 ) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
@@ -191,7 +212,11 @@ def main(
                 "Enter search filters inside the interactive search interface"
             )
             return 2
-        if args.no_recursive or args.batch_size is not None:
+        if (
+            args.no_recursive
+            or args.batch_size is not None
+            or args.index_types is not None
+        ):
             display.print_error("Index options require --index")
             return 2
         result_limit = (
@@ -234,7 +259,11 @@ def main(
             return 2
         metadata_query = None
     else:
-        if args.no_recursive or args.batch_size is not None:
+        if (
+            args.no_recursive
+            or args.batch_size is not None
+            or args.index_types is not None
+        ):
             display.print_error("Index options require --index")
             return 2
         if not semantic_query:
@@ -262,24 +291,21 @@ def main(
             url=qdrant_url,
         ) as database:
             if args.index_directory is not None:
-                with display.status("Initializing image model…"):
-                    embedding = selected_embedding_factory()
-                vector_configs = {
-                    embedding.vector_name: VectorConfig(
-                        embedding.dimensions,
-                        distance=DistanceMetric.COSINE,
+                coordinator = IndexCoordinator(
+                    _index_handlers(
+                        image_embedding_factory=selected_embedding_factory,
+                        audio_embedding_factory=(
+                            audio_embedding_factory or ClapAudioEmbedding
+                        ),
                     )
-                }
-                file_index = FileIndexRepository(
-                    database,
-                    vector_configs=vector_configs,
                 )
-                return _index_images(
-                    file_index,
+                return _index_directory(
+                    database,
                     args.index_directory,
                     recursive=not args.no_recursive,
                     batch_size=batch_size,
-                    processor=ImageProcessor(embedding=embedding),
+                    allowed_types=args.index_types,
+                    coordinator=coordinator,
                     display=display,
                 )
             file_index = FileIndexRepository(database)
@@ -334,68 +360,115 @@ def _run_interactive_search(
     return run_interactive_search(file_index, embedding, limit)
 
 
-def _index_images(
-    file_index: FileIndexRepository,
+def _index_handlers(
+    *,
+    image_embedding_factory: EmbeddingFactory,
+    audio_embedding_factory: AudioEmbeddingFactory,
+) -> tuple[IndexHandler, ...]:
+    return (
+        IndexHandler(
+            file_type="image",
+            extensions=ImageMetadataParser.supported_extensions,
+            embedding_factory=image_embedding_factory,
+            processor_factory=_image_processor_for,
+            vector_scope="file",
+        ),
+        IndexHandler(
+            file_type="audio",
+            extensions=AudioMetadataParser.supported_extensions,
+            embedding_factory=audio_embedding_factory,
+            processor_factory=_audio_processor_for,
+            vector_scope="segment",
+        ),
+    )
+
+
+def _image_processor_for(
+    embedding: BaseEmbedding[Any],
+) -> ImageProcessor:
+    if not isinstance(embedding, ImageEmbedding):
+        raise TypeError("Image index handler requires an image embedding")
+    return ImageProcessor(embedding=embedding)
+
+
+def _audio_processor_for(
+    embedding: BaseEmbedding[Any],
+) -> AudioProcessor:
+    if not isinstance(embedding, AudioEmbedding):
+        raise TypeError("Audio index handler requires an audio embedding")
+    return AudioProcessor(embedding=embedding)
+
+
+def _index_directory(
+    database: VectorDatabase,
     directory: Path,
     *,
     recursive: bool,
     batch_size: int,
-    processor: ImageProcessor,
+    allowed_types: Sequence[str] | None,
+    coordinator: IndexCoordinator,
     display: CliDisplay,
 ) -> int:
-    with display.status("Discovering images…"):
-        paths = tuple(processor.discover(directory, recursive=recursive))
+    with display.status("Discovering supported files…"):
+        plan = coordinator.discover(
+            directory,
+            recursive=recursive,
+            allowed_types=allowed_types,
+        )
+
     had_errors = False
-    pending_paths: list[Path] = []
-    with display.indexing(len(paths)) as progress:
-        for path in paths:
-            pending_paths.append(path)
-            if len(pending_paths) >= batch_size:
-                try:
-                    had_errors |= _process_and_store(
-                        file_index, pending_paths, processor, display
+    for queue in plan.queues:
+        try:
+            with ExitStack() as model_session:
+                with display.status(
+                    f"Initializing {queue.file_type} model…"
+                ):
+                    file_indexer = model_session.enter_context(
+                        queue.handler.open_indexer(database)
                     )
-                finally:
-                    progress.advance(len(pending_paths))
-                pending_paths.clear()
-        if pending_paths:
-            try:
-                had_errors |= _process_and_store(
-                    file_index, pending_paths, processor, display
+                had_errors |= _index_queue(
+                    file_indexer,
+                    queue,
+                    batch_size=batch_size,
+                    coordinator=coordinator,
+                    display=display,
                 )
-            finally:
-                progress.advance(len(pending_paths))
+        except (EOFError, KeyboardInterrupt):
+            raise
+        except Exception as error:
+            display.print_error(
+                f"Could not index {queue.file_type} files: {error}"
+            )
+            had_errors = True
     return 1 if had_errors else 0
 
 
-def _process_and_store(
-    file_index: FileIndexRepository,
-    paths: Sequence[Path],
-    processor: ImageProcessor,
+def _index_queue(
+    file_indexer: FileIndexer[Any],
+    queue: IndexQueue,
+    *,
+    batch_size: int,
+    coordinator: IndexCoordinator,
     display: CliDisplay,
 ) -> bool:
-    batch = processor.process_batch(paths)
-    if batch.failures:
-        with display.suspend():
-            for failure in batch.failures:
-                display.print_error(
-                    f"Could not index {failure.path}: {failure.error}"
-                )
-    _store(file_index, batch.files)
-    return bool(batch.failures)
-
-
-def _store(
-    file_index: FileIndexRepository,
-    processed_files: Sequence[PreparedFile],
-) -> None:
-    if not processed_files:
-        return
-    metadata_items = [processed.metadata for processed in processed_files]
-    file_index.store_many(
-        metadata_items,
-        vector_sets=[processed.vectors for processed in processed_files],
-    )
+    had_errors = False
+    label = "images" if queue.file_type == "image" else f"{queue.file_type} files"
+    with display.indexing(
+        len(queue.paths), label=f"Indexing {label}"
+    ) as progress:
+        for paths in coordinator.batches(queue, batch_size):
+            try:
+                result = file_indexer.index_batch(paths)
+                if result.failures:
+                    had_errors = True
+                    with display.suspend():
+                        for failure in result.failures:
+                            display.print_error(
+                                f"Could not index {failure.path}: {failure.error}"
+                            )
+            finally:
+                progress.advance(len(paths))
+    return had_errors
 
 
 def _metadata_query(args: argparse.Namespace) -> FileMetadataQuery:

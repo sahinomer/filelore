@@ -205,6 +205,23 @@ def test_clap_supports_custom_model_identity(
     assert overridden.vector_name == "custom_audio"
 
 
+def test_clap_close_releases_model_and_processor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        clap,
+        "_load_clap_backend",
+        lambda model_id: (FakeTorch(), FakeProcessor(), FakeModel()),
+    )
+    embedding = ClapAudioEmbedding()
+
+    embedding.close()
+    embedding.close()
+
+    assert embedding._model is None
+    assert embedding._processor is None
+
+
 def test_clap_allows_unchunked_audio_longer_than_the_model_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

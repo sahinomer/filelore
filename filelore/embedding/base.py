@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
-from typing import Generic, Sequence, TypeVar
+from typing import Any, Generic, Sequence, TypeVar
 
 
 EmbeddingInput = TypeVar("EmbeddingInput")
@@ -25,6 +25,44 @@ class BaseEmbedding(ABC, Generic[EmbeddingInput]):
         self.model_id = model_id
         self.vector_name = vector_name
         self.dimensions = dimensions
+
+    def close(self) -> None:
+        """Release resources held by this embedding implementation."""
+
+    def __enter__(self) -> BaseEmbedding[EmbeddingInput]:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    def _clear_device_cache(self, torch_module: Any, device: str) -> None:
+        """Best-effort release of the cache for the accelerator actually used."""
+        device_type = device.partition(":")[0].casefold()
+        if device_type == "cuda":
+            backend = getattr(torch_module, "cuda", None)
+            cache = getattr(backend, "empty_cache", None)
+        elif device_type == "mps":
+            backend = getattr(
+                getattr(torch_module, "backends", None), "mps", None
+            )
+            cache = getattr(
+                getattr(torch_module, "mps", None), "empty_cache", None
+            )
+        else:
+            return
+
+        is_available = getattr(backend, "is_available", None)
+        if (
+            not callable(is_available)
+            or not is_available()
+            or not callable(cache)
+        ):
+            return
+        try:
+            cache()
+        except RuntimeError:
+            # Cleanup must not turn completed indexing into a reported failure.
+            return
 
     def predict(self, item: EmbeddingInput) -> EmbeddingVector:
         """Embed one item using the implementation's batch inference path."""
