@@ -13,6 +13,7 @@ from filelore.index.filters import (
 from filelore.index.identity import (
     calculate_file_hash,
     file_point_id,
+    file_segment_point_id,
     normalized_path,
 )
 from filelore.index.models import (
@@ -22,8 +23,10 @@ from filelore.index.models import (
     FileSearchResult,
 )
 from filelore.metadata import BaseMetadata
+from filelore.processors.models import PreparedFile, PreparedSegment
 from filelore.storage import (
     CollectionConfig,
+    ConditionOperator,
     MetadataCondition,
     MetadataFilter,
     StoredRecord,
@@ -42,15 +45,28 @@ class FileIndexRepository:
         *,
         collection_name: str = "files",
         vector_configs: Mapping[str, VectorConfig] | None = None,
+        segment_collection_name: str | None = None,
+        segment_vector_configs: Mapping[str, VectorConfig] | None = None,
     ) -> None:
         self.database = database
         self.collection_name = collection_name
+        self.segment_collection_name = (
+            segment_collection_name or f"{collection_name}_segments"
+        )
+        self._segments_configured = segment_vector_configs is not None
         self.database.ensure_collection(
             CollectionConfig(
                 name=collection_name,
                 vectors=dict(vector_configs or {}),
             )
         )
+        if segment_vector_configs is not None:
+            self.database.ensure_collection(
+                CollectionConfig(
+                    name=self.segment_collection_name,
+                    vectors=dict(segment_vector_configs),
+                )
+            )
 
     def store(
         self,
@@ -81,20 +97,79 @@ class FileIndexRepository:
         self.database.upsert(self.collection_name, records)
         return tuple(entries)
 
+    def store_prepared(self, prepared_file: PreparedFile) -> FileIndexEntry:
+        """Persist one processor result and replace its timed segments."""
+        return self.store_prepared_many((prepared_file,))[0]
+
+    def store_prepared_many(
+        self, prepared_files: Sequence[PreparedFile]
+    ) -> tuple[FileIndexEntry, ...]:
+        """Persist processor results, including child segment vectors."""
+        if not prepared_files:
+            return ()
+        if (
+            any(item.segments for item in prepared_files)
+            and not self._segments_configured
+        ):
+            raise ValueError(
+                "segment_vector_configs are required to store file segments"
+            )
+
+        entries: list[FileIndexEntry] = []
+        parent_records: list[VectorRecord] = []
+        segment_records: list[VectorRecord] = []
+        for prepared_file in prepared_files:
+            self._validate_segments(prepared_file.segments)
+            entry, parent_record = self._prepare_record(
+                prepared_file.metadata,
+                vectors=prepared_file.vectors,
+                segment_count=len(prepared_file.segments),
+            )
+            entries.append(entry)
+            parent_records.append(parent_record)
+            segment_records.extend(
+                self._prepare_segment_record(parent_record, segment)
+                for segment in prepared_file.segments
+            )
+
+        parent_ids = tuple(entry.id for entry in entries)
+        if self.database.collection_exists(self.segment_collection_name):
+            self.database.delete_by_filter(
+                self.segment_collection_name,
+                MetadataFilter(
+                    all_of=(
+                        MetadataCondition(
+                            "parent_id",
+                            parent_ids,
+                            operator=ConditionOperator.IN,
+                        ),
+                    )
+                ),
+            )
+            self.database.upsert(self.segment_collection_name, segment_records)
+        self.database.upsert(self.collection_name, parent_records)
+        return tuple(entries)
+
     @staticmethod
     def _prepare_record(
         metadata: BaseMetadata,
         *,
         vectors: Mapping[str, Sequence[float]] | None,
+        segment_count: int = 0,
     ) -> tuple[FileIndexEntry, VectorRecord]:
         path = metadata.path.resolve()
         content_hash = calculate_file_hash(path)
         indexed_at = datetime.now(timezone.utc)
         point_id = file_point_id(path)
         metadata_dict = metadata.to_dict()
-        detected_format = metadata_dict.get("image_format") or metadata.extension
+        detected_format = (
+            metadata_dict.get("image_format")
+            or metadata_dict.get("audio_format")
+            or metadata.extension
+        )
         payload = {
             "schema_version": 1,
+            "record_type": "file",
             "absolute_path": str(path),
             "path_key": normalized_path(path),
             "file_name": path.name,
@@ -108,6 +183,7 @@ class FileIndexRepository:
             "size_bytes": metadata.size_bytes,
             "modified_at": metadata.modified_at.isoformat(),
             "indexed_at": indexed_at.isoformat(),
+            "segment_count": segment_count,
             "metadata": metadata_dict,
         }
         entry = FileIndexEntry(
@@ -124,6 +200,43 @@ class FileIndexRepository:
             vectors=dict(vectors or {}),
         )
         return entry, record
+
+    @staticmethod
+    def _prepare_segment_record(
+        parent_record: VectorRecord,
+        segment: PreparedSegment,
+    ) -> VectorRecord:
+        path = Path(str(parent_record.payload["absolute_path"]))
+        payload = dict(parent_record.payload)
+        payload.update(
+            {
+                "record_type": "segment",
+                "parent_id": parent_record.id,
+                "segment_index": segment.index,
+                "segment_start_seconds": segment.start_seconds,
+                "segment_end_seconds": segment.end_seconds,
+            }
+        )
+        return VectorRecord(
+            id=file_segment_point_id(path, segment.index),
+            payload=payload,
+            vectors=dict(segment.vectors),
+        )
+
+    @staticmethod
+    def _validate_segments(segments: Sequence[PreparedSegment]) -> None:
+        indexes: set[int] = set()
+        for segment in segments:
+            if segment.index in indexes:
+                raise ValueError("Segment indexes must be unique within a file")
+            if (
+                segment.start_seconds < 0
+                or segment.end_seconds <= segment.start_seconds
+            ):
+                raise ValueError("Segment timestamps must define a positive range")
+            if not segment.vectors:
+                raise ValueError("Stored file segments must contain vectors")
+            indexes.add(segment.index)
 
     def get_by_path(self, path: str | Path) -> FileIndexEntry | None:
         records = self.database.retrieve(
@@ -202,8 +315,24 @@ class FileIndexRepository:
         )
 
     def remove(self, paths: Sequence[str | Path]) -> None:
+        point_ids = tuple(file_point_id(path) for path in paths)
+        if point_ids and self.database.collection_exists(
+            self.segment_collection_name
+        ):
+            self.database.delete_by_filter(
+                self.segment_collection_name,
+                MetadataFilter(
+                    all_of=(
+                        MetadataCondition(
+                            "parent_id",
+                            point_ids,
+                            operator=ConditionOperator.IN,
+                        ),
+                    )
+                ),
+            )
         self.database.delete(
-            self.collection_name, [file_point_id(path) for path in paths]
+            self.collection_name, point_ids
         )
 
     def count(self, metadata_filter: MetadataFilter | None = None) -> int:

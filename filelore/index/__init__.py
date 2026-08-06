@@ -7,8 +7,10 @@ from filelore.index.filters import (
 )
 from filelore.index.identity import (
     FILE_ID_NAMESPACE,
+    FILE_SEGMENT_ID_NAMESPACE,
     calculate_file_hash,
     file_point_id,
+    file_segment_point_id,
     normalized_path,
 )
 from filelore.index.models import (
@@ -17,18 +19,24 @@ from filelore.index.models import (
     FileMetadataQuery,
     FileSearchResult,
 )
+from filelore.index.pipeline import FileIndexer, FileProcessor, IndexingBatch
 from filelore.index.repository import FileIndexRepository
 
 __all__ = [
     "FILE_ID_NAMESPACE",
+    "FILE_SEGMENT_ID_NAMESPACE",
     "DuplicateGroup",
     "FileIndexEntry",
     "FileIndexRepository",
+    "FileIndexer",
     "FileMetadataQuery",
+    "FileProcessor",
     "FileSearchResult",
+    "IndexingBatch",
     "calculate_file_hash",
     "file_metadata_filter",
     "file_point_id",
+    "file_segment_point_id",
     "file_type_filter",
     "normalize_file_format",
     "normalized_path",

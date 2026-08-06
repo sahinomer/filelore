@@ -156,6 +156,13 @@ class VectorDatabase(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def delete_by_filter(
+        self, collection: str, metadata_filter: MetadataFilter
+    ) -> None:
+        """Delete every record matching a required metadata filter."""
+        raise NotImplementedError
+
+    @abstractmethod
     def count(
         self, collection: str, metadata_filter: MetadataFilter | None = None
     ) -> int:

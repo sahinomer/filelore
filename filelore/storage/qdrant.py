@@ -221,6 +221,23 @@ class QdrantVectorDatabase(VectorDatabase):
             wait=True,
         )
 
+    def delete_by_filter(
+        self, collection: str, metadata_filter: MetadataFilter
+    ) -> None:
+        if not (
+            metadata_filter.all_of
+            or metadata_filter.any_of
+            or metadata_filter.none_of
+        ):
+            raise ValueError("Delete filter must contain at least one condition")
+        self._client.delete(
+            collection_name=collection,
+            points_selector=models.FilterSelector(
+                filter=self._to_qdrant_filter(metadata_filter)
+            ),
+            wait=True,
+        )
+
     def count(
         self, collection: str, metadata_filter: MetadataFilter | None = None
     ) -> int:
