@@ -42,6 +42,11 @@ uv run --group test python -m pytest
 See the [benchmark guide](benchmarks/README.md) for repeatable CLIP and CLAP
 embedding and Qdrant storage workloads.
 
+## Profiling
+
+See the [indexing profiler guide](profiling/README.md) for external stage,
+resource, disk-I/O, and GPU observation of the real indexing pipeline.
+
 ## Index
 
 Index the supported files under a directory:

@@ -16,3 +16,4 @@ __pycache__/
 # Data
 .data
 /benchmarks/results/
+/profiling/results/

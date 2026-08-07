@@ -23,6 +23,7 @@ embedding = [
 ]
 
 [dependency-groups]
+profiling = ["psutil>=6,<8"]
 test = ["pytest>=8,<10"]
 
 [tool.uv]
