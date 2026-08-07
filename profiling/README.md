@@ -25,6 +25,15 @@ uv run --extra embedding --group profiling python -m profiling.index_pipeline \
   --audio-directory /path/to/audio
 ```
 
+Profile the same workload against a running Qdrant service:
+
+```sh
+uv run --extra embedding --group profiling python -m profiling.index_pipeline \
+  --image-directory /path/to/image \
+  --audio-directory /path/to/audio \
+  --qdrant-url http://127.0.0.1:6333
+```
+
 The default uses an isolated temporary local Qdrant index, the production
 index batch size of 100, a 200 ms resource-sampling interval, and the standard
 CLIP and CLAP models. Models must already be downloaded if the machine is
@@ -32,7 +41,18 @@ offline.
 
 Use `--index-path` to retain the diagnostic index. For safety, an explicit
 index path must be absent or empty; the profiler never clears an existing
-index. Use `--cprofile` to add a Python call profile.
+index. `--qdrant-url` and `--index-path` are mutually exclusive. A service
+profile requires the `files` and `files_segments` collections to be absent or
+empty; the profiler checks them but never clears them. Use `--cprofile` to add
+a Python call profile.
+
+When Docker publishes Qdrant only on IPv4, use `127.0.0.1` rather than
+`localhost`. An IPv6-first `localhost` resolution can add a connection fallback
+delay to every Qdrant request.
+
+Stage timings include time waiting for a Qdrant service. Process CPU, RAM, and
+I/O samples cover FileLore only, not the separate Qdrant process or container.
+System CPU and device-wide NVIDIA GPU samples retain their original scope.
 
 ## Metrics
 
@@ -83,23 +103,40 @@ system.
 | GPU | NVIDIA GeForce RTX 3070 Laptop GPU (8 GB) |
 
 Configuration: Windows 11, Python 3.12.3, PyTorch 2.13.0 with CUDA
-13.0, Transformers 4.57.6, an isolated temporary Qdrant local-mode index,
-index batch size 100, `openai/clip-vit-base-patch32`, and
-`laion/larger_clap_general`.
+13.0, Transformers 4.57.6, index batch size 100,
+`openai/clip-vit-base-patch32`, and `laion/larger_clap_general`. The Local Mode
+profile used an isolated temporary index. The service profile used Qdrant
+1.18.3 in Docker through `http://127.0.0.1:6333`.
 
 | Dataset | Workload | Items |
 | --- | --- | ---: |
 | [COCO 2017 validation images](https://cocodataset.org/#download) | Image | 5,000 |
 | [Clotho evaluation split](https://zenodo.org/records/3490684) | Audio | 1,045 |
 
-Both modality runs completed successfully with no recorded stage errors. They
-ran sequentially and indexed 6,045 source files in 253.19 seconds.
-
-| Phase | End-to-end time | Share of run | End-to-end throughput | Queue time | Queue throughput |
+| Phase | End-to-end time | Share of run | End-to-end source throughput | Queue time | Queue source throughput |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Image | 85.47 s | 33.76% | 58.50 images/s | 70.59 s | 70.83 images/s |
 | Audio | 167.71 s | 66.24% | 6.23 files/s | 160.93 s | 6.49 files/s |
 | Complete run | 253.19 s | 100.00% | - | - | - |
+
+Audio throughput is reported per source file; the 1,045 audio files produced
+4,160 overlapping segments (3.98 model inputs per file), so chunking contributes
+substantially to the lower files/s figure and corresponds to 24.80 segments/s
+end-to-end and 25.85 segments/s within the indexing queue.
+
+### Qdrant mode comparison
+
+Both profiles use the same datasets, models, segmentation settings, and index
+batch size.
+
+| Metric | Local Mode | Qdrant service | Change |
+| --- | ---: | ---: | ---: |
+| Complete run | 253.19 s | 222.57 s | 12.1% faster |
+| Image phase | 85.47 s | 68.45 s | 19.9% faster |
+| Audio phase | 167.71 s | 154.13 s | 8.1% faster |
+| Storage preparation and write | 52.75 s | 11.40 s | 78.4% faster |
+| Actual upserts | 48.69 s | 6.70 s | 86.2% faster |
+| Upsert throughput | 209.61 points/s | 1,522.66 points/s | 7.26x higher |
 
 ### End-to-end phase steps
 

@@ -21,6 +21,7 @@ from filelore.embedding import (
     ClipImageEmbedding,
     ImageEmbedding,
 )
+from filelore.storage import QdrantVectorDatabase
 from profiling.instrumentation import ExternalInstrumentation
 from profiling.metrics import (
     ResourceSampler,
@@ -41,6 +42,7 @@ class ProfileConfiguration:
     image_directory: Path | None = None
     audio_directory: Path | None = None
     index_path: Path | None = None
+    qdrant_url: str | None = None
     batch_size: int = 100
     image_model: str = DEFAULT_IMAGE_MODEL
     audio_model: str = DEFAULT_AUDIO_MODEL
@@ -85,7 +87,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=Path,
         help="result directory (default: profiling/results/<timestamp>)",
     )
-    parser.add_argument(
+    storage = parser.add_mutually_exclusive_group()
+    storage.add_argument(
+        "--qdrant-url",
+        help=(
+            "Qdrant service URL; the files and files_segments collections "
+            "must be absent or empty"
+        ),
+    )
+    storage.add_argument(
         "--index-path",
         type=Path,
         help=(
@@ -137,6 +147,9 @@ def configuration_from_args(args: argparse.Namespace) -> ProfileConfiguration:
         index_path=(
             args.index_path.expanduser() if args.index_path is not None else None
         ),
+        qdrant_url=(
+            args.qdrant_url.strip() if args.qdrant_url is not None else None
+        ),
         batch_size=args.batch_size,
         image_model=args.image_model,
         audio_model=args.audio_model,
@@ -151,7 +164,10 @@ def configuration_from_args(args: argparse.Namespace) -> ProfileConfiguration:
 
 
 def validate_configuration(configuration: ProfileConfiguration) -> None:
-    if configuration.image_directory is None and configuration.audio_directory is None:
+    if (
+        configuration.image_directory is None
+        and configuration.audio_directory is None
+    ):
         raise ValueError("Provide at least one image or audio directory")
     for label, directory in (
         ("Image", configuration.image_directory),
@@ -163,6 +179,16 @@ def validate_configuration(configuration: ProfileConfiguration) -> None:
         raise ValueError("Batch size must be positive")
     if configuration.sample_interval_ms < 50:
         raise ValueError("Resource sample interval must be at least 50 ms")
+    if (
+        configuration.qdrant_url is not None
+        and not configuration.qdrant_url.strip()
+    ):
+        raise ValueError("Qdrant URL must not be empty")
+    if (
+        configuration.qdrant_url is not None
+        and configuration.index_path is not None
+    ):
+        raise ValueError("Qdrant URL cannot be combined with a local index path")
     if configuration.index_path is not None:
         path = configuration.index_path
         if path.exists() and (not path.is_dir() or any(path.iterdir())):
@@ -184,6 +210,8 @@ def run_profile(
 ) -> ProfileResult:
     """Run actual indexing while observing it from an external layer."""
     validate_configuration(configuration)
+    if configuration.qdrant_url is not None:
+        _validate_empty_qdrant_service(configuration.qdrant_url)
     configuration.output_directory.mkdir(parents=True, exist_ok=True)
     recorder = StageRecorder()
     samples: list[ResourceSample] = []
@@ -205,7 +233,9 @@ def run_profile(
     )
 
     with ExitStack() as stack:
-        if configuration.index_path is None:
+        if configuration.qdrant_url is not None:
+            index_path = None
+        elif configuration.index_path is None:
             temporary = stack.enter_context(
                 tempfile.TemporaryDirectory(prefix="filelore-index-profile-")
             )
@@ -245,6 +275,7 @@ def run_profile(
                         index_path,
                         configuration.batch_size,
                         recorder,
+                        qdrant_url=configuration.qdrant_url,
                         image_factory=profiled_image_factory,
                         audio_factory=profiled_audio_factory,
                     )
@@ -255,6 +286,7 @@ def run_profile(
                         index_path,
                         configuration.batch_size,
                         recorder,
+                        qdrant_url=configuration.qdrant_url,
                         image_factory=profiled_image_factory,
                         audio_factory=profiled_audio_factory,
                     )
@@ -320,11 +352,16 @@ def run_profile(
             else None
         ),
         "index_mode": (
-            "temporary" if configuration.index_path is None else "persistent"
+            "service"
+            if configuration.qdrant_url is not None
+            else "temporary"
+            if configuration.index_path is None
+            else "persistent"
         ),
         "index_path": (
             str(configuration.index_path) if configuration.index_path else None
         ),
+        "qdrant_url": configuration.qdrant_url,
         "batch_size": configuration.batch_size,
         "image_model": configuration.image_model,
         "audio_model": configuration.audio_model,
@@ -356,10 +393,11 @@ def run_profile(
 def _run_dataset(
     directory: Path,
     modality: str,
-    index_path: Path,
+    index_path: Path | None,
     batch_size: int,
     recorder: StageRecorder,
     *,
+    qdrant_url: str | None = None,
     image_factory: Callable[[], ImageEmbedding],
     audio_factory: Callable[[], AudioEmbedding],
 ) -> int:
@@ -370,15 +408,44 @@ def _run_dataset(
         modality,
         "--batch-size",
         str(batch_size),
-        "--index-path",
-        str(index_path),
         "--yes",
     ]
+    if qdrant_url is not None:
+        arguments.extend(("--qdrant-url", qdrant_url))
+    else:
+        if index_path is None:
+            raise ValueError("Local profiling requires an index path")
+        arguments.extend(("--index-path", str(index_path)))
     with recorder.span(f"overall.{modality}"):
         return filelore_main(
             arguments,
             image_embedding_factory=image_factory,
             audio_embedding_factory=audio_factory,
+        )
+
+
+def _validate_empty_qdrant_service(url: str) -> None:
+    """Refuse to mix a diagnostic run with an existing service index."""
+    nonempty: dict[str, int] = {}
+    try:
+        with QdrantVectorDatabase(url=url) as database:
+            for collection in ("files", "files_segments"):
+                if not database.collection_exists(collection):
+                    continue
+                count = database.count(collection)
+                if count:
+                    nonempty[collection] = count
+    except Exception as error:
+        raise RuntimeError(
+            f"Could not inspect Qdrant service at {url}: {error}"
+        ) from error
+    if nonempty:
+        counts = ", ".join(
+            f"{collection}={count}" for collection, count in nonempty.items()
+        )
+        raise ValueError(
+            "Qdrant service profiling requires empty FileLore collections; "
+            f"found {counts} at {url}"
         )
 
 

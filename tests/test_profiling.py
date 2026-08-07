@@ -6,6 +6,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Sequence
+from unittest.mock import MagicMock, patch
 
 import pytest
 from PIL import Image
@@ -16,7 +17,13 @@ from filelore.embedding import (
 )
 from filelore.embedding.audio import ClapAudioEmbedding
 from filelore.embedding.image import ClipImageEmbedding
-from profiling.index_pipeline import ProfileConfiguration, run_profile
+from profiling.index_pipeline import (
+    ProfileConfiguration,
+    _run_dataset,
+    _validate_empty_qdrant_service,
+    run_profile,
+    validate_configuration,
+)
 from profiling.instrumentation import validate_instrumentation_targets
 from profiling.metrics import StageRecorder, aggregate_stages
 
@@ -208,3 +215,58 @@ def test_profile_refuses_nonempty_index_and_output_directories(
             ),
             image_embedding_factory=ProfileImageEmbedding,
         )
+
+
+def test_profile_refuses_local_path_with_service_url(tmp_path: Path) -> None:
+    images = tmp_path / "images"
+    images.mkdir()
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        validate_configuration(
+            ProfileConfiguration(
+                output_directory=tmp_path / "results",
+                image_directory=images,
+                index_path=tmp_path / "index",
+                qdrant_url="http://localhost:6333",
+                resource_sampling=False,
+            )
+        )
+
+
+def test_run_dataset_forwards_service_url() -> None:
+    recorder = StageRecorder()
+
+    with patch("profiling.index_pipeline.filelore_main", return_value=0) as main:
+        exit_code = _run_dataset(
+            Path("dataset"),
+            "image",
+            None,
+            100,
+            recorder,
+            qdrant_url="http://localhost:6333",
+            image_factory=ProfileImageEmbedding,
+            audio_factory=ProfileAudioEmbedding,
+        )
+
+    arguments = main.call_args.args[0]
+    assert exit_code == 0
+    assert arguments[arguments.index("--qdrant-url") + 1] == (
+        "http://localhost:6333"
+    )
+    assert "--index-path" not in arguments
+
+
+def test_profile_refuses_nonempty_service_collections() -> None:
+    database = MagicMock()
+    database.__enter__.return_value = database
+    database.collection_exists.return_value = True
+    database.count.side_effect = (3, 8)
+
+    with (
+        patch(
+            "profiling.index_pipeline.QdrantVectorDatabase",
+            return_value=database,
+        ),
+        pytest.raises(ValueError, match="files=3, files_segments=8"),
+    ):
+        _validate_empty_qdrant_service("http://localhost:6333")
