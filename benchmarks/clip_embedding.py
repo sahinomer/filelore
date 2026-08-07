@@ -120,7 +120,7 @@ def parse_args() -> argparse.Namespace:
         "--use-fast-processor",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="use the fast CLIP image processor (default: enabled)",
+        help="use the fast CLIP image processor and tokenizer (default: enabled)",
     )
     parser.add_argument(
         "--batch-sizes",

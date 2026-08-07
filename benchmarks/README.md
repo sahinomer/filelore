@@ -22,11 +22,22 @@ Configuration: `openai/clip-vit-base-patch32`, 64 synthetic 512x512 images, 64
 text prompts, batch sizes 1/8/16/32, 2 warm-up runs, and 5 measured runs. Only
 `use_fast` changes between runs.
 
-| Processor option | Single image median | Best batch | Best median/item | Best throughput |
-| --- | ---: | ---: | ---: | ---: |
-| `use_fast=True` | 10.903 ms | 16 | 4.637 ms | 215.678 items/s |
-| `use_fast=False` | 13.822 ms | 16 | 7.352 ms | 136.026 items/s |
-| Difference | 21.1% lower | - | 36.9% lower | 58.6% higher |
+| Workload | Processor option | Single-item median | Sequential median/item | Sequential throughput | Best batch | Best median/item | Best throughput |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Image | `use_fast=True` | 10.903 ms | 12.448 ms | 80.333 items/s | 16 | 4.637 ms | 215.678 items/s |
+| Image | `use_fast=False` | 13.822 ms | 14.533 ms | 68.807 items/s | 16 | 7.352 ms | 136.026 items/s |
+| Text | `use_fast=True` | 10.052 ms | 8.843 ms | 113.082 items/s | 32 | 0.531 ms | 1882.453 items/s |
+| Text | `use_fast=False` | 9.954 ms | 10.414 ms | 96.022 items/s | 32 | 0.842 ms | 1187.726 items/s |
+
+For the recorded Transformers 4.57.6 runs, `use_fast` is forwarded to both
+the CLIP image processor and `AutoTokenizer`, so it is applicable to both
+workloads. Compared with the legacy option, the fast image processor reduced
+single-image latency by 21.1% and best-batch latency per item by 36.9%, while
+increasing best image throughput by 58.6%.
+
+`Single-item median` represents one direct prediction. The sequential columns
+measure sustained processing of all 64 inputs with model batch size 1 and are
+included because FileLore currently embeds one search text query per request.
 
 ## CLAP embedding
 
@@ -44,9 +55,10 @@ batch sizes 1/4/8/16, 2 warm-up runs, and 5 measured runs. Use
 `--audio-duration` to run a shorter waveform workload on memory-constrained
 systems.
 
-| Model | Single audio median | Best batch | Best median/item | Best throughput |
-| --- | ---: | ---: | ---: | ---: |
-| `laion/larger_clap_general` | 44.887 ms | 16 | 29.205 ms | 34.240 items/s |
+| Workload | Single-item median | Sequential median/item | Sequential throughput | Best batch | Best median/item | Best throughput |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Audio | 44.887 ms | 49.812 ms | 20.075 items/s | 16 | 29.205 ms | 34.240 items/s |
+| Text | 11.129 ms | 11.244 ms | 88.933 items/s | 16 | 0.914 ms | 1094.335 items/s |
 
 ## Qdrant storage
 
