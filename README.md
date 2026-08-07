@@ -39,8 +39,8 @@ uv run --group test python -m pytest
 
 ## Benchmarks
 
-See the [benchmark guide](benchmarks/README.md) for repeatable CLIP embedding
-and Qdrant storage workloads.
+See the [benchmark guide](benchmarks/README.md) for repeatable CLIP and CLAP
+embedding and Qdrant storage workloads.
 
 ## Index
 

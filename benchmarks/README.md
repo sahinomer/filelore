@@ -28,6 +28,26 @@ text prompts, batch sizes 1/8/16/32, 2 warm-up runs, and 5 measured runs. Only
 | `use_fast=False` | 13.822 ms | 16 | 7.352 ms | 136.026 items/s |
 | Difference | 21.1% lower | - | 36.9% lower | 58.6% higher |
 
+## CLAP embedding
+
+```sh
+uv run --extra embedding python -m benchmarks.clap_embedding
+```
+
+Add `--output benchmarks/results/clap.json` to save the full result locally.
+The benchmark does not require a comparison option: its baseline score is the
+best median audio-embedding throughput across the configured batch sizes.
+
+Configuration: `laion/larger_clap_general`, 64 deterministic synthetic mono
+waveforms at the model's sampling rate and maximum duration, 64 text prompts,
+batch sizes 1/4/8/16, 2 warm-up runs, and 5 measured runs. Use
+`--audio-duration` to run a shorter waveform workload on memory-constrained
+systems.
+
+| Model | Single audio median | Best batch | Best median/item | Best throughput |
+| --- | ---: | ---: | ---: | ---: |
+| `laion/larger_clap_general` | 44.887 ms | 16 | 29.205 ms | 34.240 items/s |
+
 ## Qdrant storage
 
 Run the same workload in Python Local Mode and against a Qdrant service:
