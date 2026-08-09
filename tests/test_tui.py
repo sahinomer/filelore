@@ -296,6 +296,35 @@ async def test_tui_searches_only_after_enter_and_reuses_active_model(
         assert len(repository.calls) == 2
 
 
+@pytest.mark.anyio
+async def test_tui_keeps_result_cards_clear_of_the_vertical_scrollbar(
+    tmp_path: Path,
+) -> None:
+    repository = RecordingSearchRepository(
+        file_results=tuple(
+            image_result(tmp_path / f"image-{index}.png")
+            for index in range(20)
+        )
+    )
+    created: list[RecordingImageEmbedding] = []
+    app = FileLoreSearchApp(image_session(repository, created), limit=20)
+
+    async with app.run_test(size=(104, 38)) as pilot:
+        app.query_one("#query", Input).value = "cat"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        results_scroll = app.query_one("#results-scroll")
+        first_card = app.query(SearchResultCard).first()
+        assert results_scroll.show_vertical_scrollbar
+        assert (
+            results_scroll.vertical_scrollbar.region.x
+            - first_card.region.right
+            >= 2
+        )
+
+
 def test_session_switches_models_only_when_a_new_target_is_searched(
     tmp_path: Path,
 ) -> None:
@@ -426,6 +455,11 @@ async def test_tui_audio_search_uses_filters_overfetches_and_groups_chunks(
         assert repository.calls[0]["metadata_filter"] is not None
         assert len(app.query(SearchResultCard)) == 1
         assert len(app.query(Collapsible)) == 1
+        chunk_list = app.query_one(Collapsible)
+        chunk_list.collapsed = False
+        await pilot.pause()
+        chunk_matches = chunk_list.query_one(".chunk-matches", Static)
+        assert chunk_list.region.right - chunk_matches.region.right >= 2
         status = str(app.query_one("#status", Static).content)
         assert "Found 1 file" in status
         assert "grouped 2 audio chunks into 1 file" in status
@@ -446,9 +480,12 @@ async def test_tui_help_tracks_selected_target(tmp_path: Path) -> None:
 
     async with app.run_test(size=(100, 32)) as pilot:
         target = app.query_one("#target", Select)
+        query = app.query_one("#query", Input)
+        assert query.placeholder == "Describe image…"
         assert not target.disabled
         target.value = "audio"
         await pilot.pause()
+        assert query.placeholder == "Describe audio…"
         await pilot.press("f1")
         await pilot.pause()
 

@@ -286,7 +286,10 @@ class SearchResultCard(Vertical):
         )
         if self.entity.chunks:
             yield Collapsible(
-                Static(_chunk_matches_renderable(self.entity.chunks)),
+                Static(
+                    _chunk_matches_renderable(self.entity.chunks),
+                    classes="chunk-matches",
+                ),
                 title=(
                     f"{len(self.entity.chunks)} matching chunks "
                     "(best first)"
@@ -376,10 +379,12 @@ class FileLoreSearchApp(App[None]):
         border: round $primary;
         padding: 1;
         background: $panel;
+        scrollbar-gutter: stable;
     }
 
     #results {
         height: auto;
+        margin-right: 2;
     }
 
     .result-card {
@@ -397,6 +402,8 @@ class FileLoreSearchApp(App[None]):
         height: auto;
         margin-left: 4;
         margin-top: 1;
+        padding-bottom: 1;
+        padding-right: 2;
     }
     """
 
@@ -417,7 +424,7 @@ class FileLoreSearchApp(App[None]):
                     id="target",
                 )
                 yield Input(
-                    placeholder="Describe a file, then press Enter to search…",
+                    placeholder="Describe a file…",
                     id="query",
                 )
                 yield Static("Limit", id="limit-label")
@@ -603,10 +610,8 @@ class FileLoreSearchApp(App[None]):
         )
 
     def _update_query_placeholder(self, target: str) -> None:
-        label = "an image" if target == "image" else "an audio file"
-        self.query_one("#query", Input).placeholder = (
-            f"Describe {label}, then press Enter to search…"
-        )
+        label = "image" if target == "image" else "audio"
+        self.query_one("#query", Input).placeholder = f"Describe {label}…"
 
     def on_unmount(self) -> None:
         self.session.close()
