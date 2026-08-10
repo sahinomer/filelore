@@ -32,12 +32,16 @@ from filelore.index import FileSearchResult, FileSegmentMatch, IndexWorkPlan
 
 
 class ProcessingRateColumn(ProgressColumn):
-    """Render a per-file processing rate for determinate indexing tasks."""
+    """Render a configurable processing rate for determinate tasks."""
+
+    def __init__(self, unit: str = "files") -> None:
+        super().__init__()
+        self.unit = unit
 
     def render(self, task: Task) -> Text:
         if task.speed is None:
-            return Text("? files/s")
-        return Text(f"{task.speed:.1f} files/s")
+            return Text(f"? {self.unit}/s")
+        return Text(f"{task.speed:.1f} {self.unit}/s")
 
 
 class IndexingProgress:
@@ -89,8 +93,9 @@ class CliDisplay:
         *,
         label: str = "Indexing files",
         label_width: int | None = None,
+        rate_unit: str = "files",
     ) -> Iterator[IndexingProgress]:
-        """Display determinate per-file indexing progress when there is work."""
+        """Display determinate processing progress when there is work."""
         if total == 0:
             yield IndexingProgress()
             return
@@ -105,7 +110,7 @@ class CliDisplay:
             TaskProgressColumn(),
             TimeElapsedColumn(),
             TimeRemainingColumn(),
-            ProcessingRateColumn(),
+            ProcessingRateColumn(rate_unit),
             console=self._console,
         )
         task_id = progress.add_task(label, total=total)
@@ -180,6 +185,11 @@ class CliDisplay:
         """Write an unchanged line to stderr without colliding with a live bar."""
         with self.suspend():
             print(message, file=self._stderr)
+
+    def print_info(self, message: str) -> None:
+        """Write an informational line without colliding with a live bar."""
+        with self.suspend():
+            self._console.print(message)
 
     def print_search_results(
         self,

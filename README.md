@@ -42,6 +42,11 @@ uv run --group test python -m pytest
 See the [benchmark guide](benchmarks/README.md) for repeatable CLIP and CLAP
 embedding and Qdrant storage workloads.
 
+## Retrieval evaluation
+
+See the [retrieval evaluation guide](evaluation/README.md) for COCO and Clotho
+MRR, Recall, NDCG, and query-latency measurements against an existing index.
+
 ## Profiling
 
 See the [indexing profiler guide](profiling/README.md) for external stage,
