@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time
+from math import isfinite
 from pathlib import Path
 from typing import Mapping
 
@@ -167,10 +168,16 @@ def _structured_metadata_query(
         raise ValueError("sample rate must be positive")
     if bitrate_bps is not None and bitrate_bps < 1:
         raise ValueError("bitrate must be positive")
-    if duration_longer_than is not None and duration_longer_than < 0:
-        raise ValueError("longer-than duration must be non-negative")
-    if duration_shorter_than is not None and duration_shorter_than <= 0:
-        raise ValueError("shorter-than duration must be positive")
+    if duration_longer_than is not None:
+        if not isfinite(duration_longer_than):
+            raise ValueError("longer-than duration must be finite")
+        if duration_longer_than < 0:
+            raise ValueError("longer-than duration must be non-negative")
+    if duration_shorter_than is not None:
+        if not isfinite(duration_shorter_than):
+            raise ValueError("shorter-than duration must be finite")
+        if duration_shorter_than <= 0:
+            raise ValueError("shorter-than duration must be positive")
     if (
         duration_longer_than is not None
         and duration_shorter_than is not None
