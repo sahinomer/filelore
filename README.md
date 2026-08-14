@@ -96,9 +96,17 @@ is submitted, retains it for later searches, and releases it before switching
 to the other target. Supplying `--target image` or `--target audio` when the
 TUI is launched constrains the selector to that target.
 
-Select File beside either target and enter a reference image or audio path to
-find similar indexed media. Optional result filters have a separate field in
-File mode.
+Enter a reference image or audio path directly in the search field to find
+similar indexed media. Relative paths start from the terminal's working
+directory. Filesystem suggestions appear as you type; press Tab or Right to
+accept a completion, or use Browse / Ctrl+O to select a supported file with the
+keyboard or mouse. The file extension selects the matching target
+automatically. The detected file appears as a removable attachment, while
+optional result filters remain in the same query field:
+
+```text
+samples/rain.wav format:wav longer-than:1 shorter-than:30
+```
 
 Interactive queries may combine semantic text with the metadata currently
 stored in the index. Image queries support:

@@ -15,9 +15,13 @@ from filelore.storage import MetadataFilter
 def validate_query_file(
     path: str | Path,
     supported_extensions: Collection[str],
+    *,
+    base_directory: str | Path | None = None,
 ) -> Path:
     """Resolve a query file after validating its existence and extension."""
     prepared = Path(path).expanduser()
+    if not prepared.is_absolute() and base_directory is not None:
+        prepared = Path(base_directory).expanduser() / prepared
     if not prepared.is_file():
         raise ValueError(f"Query file does not exist: {prepared}")
     normalized_extensions = {

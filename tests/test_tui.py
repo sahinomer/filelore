@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import wave
 from datetime import datetime
 from pathlib import Path
@@ -8,7 +9,7 @@ from typing import Any, Callable, Sequence
 import pytest
 from PIL import Image
 from textual.containers import Vertical
-from textual.widgets import Collapsible, Input, Select, Static
+from textual.widgets import Button, Collapsible, Input, Select, Static
 
 from filelore.embedding import (
     AudioEmbedding,
@@ -38,6 +39,14 @@ from filelore.tui import (
     QueryHelpScreen,
     SearchResultCard,
 )
+from filelore.ui import (
+    FilePickerScreen,
+    FileSystemPathSuggester,
+    QueryBar,
+    SupportedFileTree,
+    TailPathLabel,
+    shorten_path_from_start,
+)
 
 
 @pytest.fixture
@@ -53,6 +62,30 @@ def create_wave(path: Path, *, duration_seconds: float = 0.25) -> None:
         output.setsampwidth(2)
         output.setframerate(sample_rate)
         output.writeframes(b"\x00\x00" * frame_count)
+
+
+def test_long_attachment_paths_are_shortened_from_the_start() -> None:
+    path = r"collection\several\nested\directories\reference-audio.wav"
+
+    shortened = shorten_path_from_start(path, 24)
+
+    assert shortened.startswith("...")
+    assert shortened.endswith("reference-audio.wav")
+    assert len(shortened) <= 24
+
+
+@pytest.mark.anyio
+async def test_path_suggester_completes_supported_files_and_directories(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "samples").mkdir()
+    (tmp_path / "reference.wav").touch()
+    (tmp_path / "readme.txt").touch()
+    suggester = FileSystemPathSuggester(tmp_path, {".wav", ".png"})
+
+    assert await suggester.get_suggestion("ref") == "reference.wav"
+    assert await suggester.get_suggestion("sam") == f"samples{os.sep}"
+    assert await suggester.get_suggestion("readm") is None
 
 
 class RecordingImageEmbedding(ImageEmbedding):
@@ -266,6 +299,12 @@ async def test_tui_uses_target_search_layout_and_limit_options(
     async with app.run_test(size=(100, 32)):
         assert app.SUB_TITLE == "Interactive semantic file search"
         assert app.query_one("#target", Select).disabled
+        assert len(app.query("#query-mode")) == 0
+        assert len(app.query("#file-filters")) == 0
+        assert app.query_one(QueryBar).attached_file is None
+        browse = app.query_one("#browse-query-file", Button)
+        assert str(browse.label) == "Browse"
+        assert browse.content_region.width >= len("Browse")
         assert app._target_options() == (("Image", "image"),)
         assert app._limit_options() == (
             ("5", 5),
@@ -276,6 +315,145 @@ async def test_tui_uses_target_search_layout_and_limit_options(
             ("100", 100),
         )
         assert created == []
+
+
+@pytest.mark.anyio
+async def test_tui_file_picker_attaches_file_and_infers_target(
+    tmp_path: Path,
+) -> None:
+    query_path = tmp_path / "reference.wav"
+    unsupported_path = tmp_path / "notes.txt"
+    create_wave(query_path)
+    unsupported_path.touch()
+    session = SearchService(
+        RecordingSearchRepository(),  # type: ignore[arg-type]
+        {
+            "image": handler("image", RecordingImageEmbedding),
+            "audio": handler("audio", RecordingAudioEmbedding),
+        },
+        ("image", "audio"),
+        file_query_vectorizers={
+            "image": ImageFileQueryVectorizer(),
+            "audio": AudioFileQueryVectorizer(),
+        },
+    )
+    app = FileLoreSearchApp(
+        session,
+        limit=20,
+        working_directory=tmp_path,
+    )
+
+    async with app.run_test(size=(100, 32)) as pilot:
+        query_bar = app.query_one(QueryBar)
+        query_bar.value = "text that will be replaced"
+
+        await pilot.click("#browse-query-file")
+        await pilot.pause()
+
+        assert isinstance(app.screen, FilePickerScreen)
+        tree = app.screen.query_one(SupportedFileTree)
+        assert set(tree.filter_paths((query_path, unsupported_path))) == {
+            query_path
+        }
+        app.screen.dismiss(query_path.resolve())
+        await pilot.pause()
+
+        assert query_bar.attached_file == query_path.resolve()
+        assert query_bar.value == ""
+        assert query_bar.input.suggester is None
+        assert app.query_one("#target", Select).value == "audio"
+        assert query_bar.input.placeholder == "Filter similar audio files…"
+
+        await pilot.click("#clear-query-file")
+        await pilot.pause()
+
+        assert query_bar.attached_file is None
+        assert query_bar.input.suggester is query_bar.path_suggester
+
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        assert isinstance(app.screen, FilePickerScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, FilePickerScreen)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("completion_key", ("right", "tab"))
+async def test_tui_accepts_filesystem_completion(
+    tmp_path: Path,
+    completion_key: str,
+) -> None:
+    (tmp_path / "reference.png").touch()
+    repository = RecordingSearchRepository()
+    created: list[RecordingImageEmbedding] = []
+    app = FileLoreSearchApp(
+        image_session(repository, created),
+        limit=20,
+        working_directory=tmp_path,
+    )
+
+    async with app.run_test(size=(100, 32)) as pilot:
+        query = app.query_one("#query", Input)
+        query.value = "ref"
+        await pilot.pause()
+
+        await pilot.press(completion_key)
+        await pilot.pause()
+
+        assert query.value == "reference.png"
+
+
+@pytest.mark.anyio
+async def test_tui_tab_moves_focus_when_no_completion_exists(
+    tmp_path: Path,
+) -> None:
+    repository = RecordingSearchRepository()
+    created: list[RecordingImageEmbedding] = []
+    app = FileLoreSearchApp(
+        image_session(repository, created),
+        limit=20,
+        working_directory=tmp_path,
+    )
+
+    async with app.run_test(size=(100, 32)) as pilot:
+        query = app.query_one("#query", Input)
+        query.value = "a semantic query without a local match"
+        await pilot.pause()
+
+        await pilot.press("tab")
+        await pilot.pause()
+
+        assert app.query_one("#browse-query-file", Button).has_focus
+
+
+@pytest.mark.anyio
+async def test_tui_long_attachment_label_fits_and_preserves_path_end(
+    tmp_path: Path,
+) -> None:
+    repository = RecordingSearchRepository()
+    created: list[RecordingImageEmbedding] = []
+    app = FileLoreSearchApp(
+        image_session(repository, created),
+        limit=20,
+        working_directory=tmp_path,
+    )
+    long_path = (
+        tmp_path
+        / "a-very-long-collection-name"
+        / "another-long-directory-name"
+        / "reference-image.png"
+    )
+
+    async with app.run_test(size=(76, 30)) as pilot:
+        app.query_one(QueryBar).attach_file(long_path)
+        await pilot.pause()
+
+        label = app.query_one(TailPathLabel)
+        rendered = label.render().plain
+        assert rendered.startswith("📎 ...")
+        assert rendered.endswith(".png")
+        assert len(rendered) <= label.content_size.width
 
 
 @pytest.mark.anyio
@@ -331,15 +509,15 @@ async def test_tui_searches_for_images_similar_to_a_file(
         file_results=(image_result(tmp_path / "similar.png"),)
     )
     created: list[RecordingImageEmbedding] = []
-    app = FileLoreSearchApp(image_session(repository, created), limit=10)
+    app = FileLoreSearchApp(
+        image_session(repository, created),
+        limit=10,
+        working_directory=tmp_path,
+    )
 
     async with app.run_test(size=(110, 36)) as pilot:
-        mode = app.query_one("#query-mode", Select)
-        mode.value = "file"
-        await pilot.pause()
         query = app.query_one("#query", Input)
-        query.value = str(query_path)
-        app.query_one("#file-filters", Input).value = "format:png"
+        query.value = "reference.png format:png"
 
         await pilot.press("enter")
         await app.workers.wait_for_complete()
@@ -348,6 +526,11 @@ async def test_tui_searches_for_images_similar_to_a_file(
         assert len(created) == 1
         assert created[0].texts == []
         assert created[0].images == [query_path.resolve()]
+        assert app.query_one(QueryBar).attached_file == query_path.resolve()
+        assert query.value == "format:png"
+        assert not app.query_one("#query-file-label", Static).has_class(
+            "hidden"
+        )
         assert repository.calls[0]["scope"] == "file"
         assert repository.calls[0]["metadata_filter"] is not None
         assert "format:png" in str(
@@ -575,6 +758,11 @@ async def test_tui_searches_for_audio_similar_to_a_file(
         )
     )
     audios: list[RecordingAudioEmbedding] = []
+    images: list[RecordingImageEmbedding] = []
+
+    def image_factory() -> RecordingImageEmbedding:
+        images.append(RecordingImageEmbedding())
+        return images[-1]
 
     def factory() -> RecordingAudioEmbedding:
         audios.append(RecordingAudioEmbedding())
@@ -582,25 +770,32 @@ async def test_tui_searches_for_audio_similar_to_a_file(
 
     session = SearchService(
         repository,  # type: ignore[arg-type]
-        {"audio": handler("audio", factory)},
-        ("audio",),
+        {
+            "image": handler("image", image_factory),
+            "audio": handler("audio", factory),
+        },
+        ("image", "audio"),
         file_query_vectorizers={"audio": AudioFileQueryVectorizer()},
     )
-    app = FileLoreSearchApp(session, limit=10)
+    app = FileLoreSearchApp(
+        session,
+        limit=10,
+        working_directory=tmp_path,
+    )
 
     async with app.run_test(size=(110, 38)) as pilot:
-        app.query_one("#query-mode", Select).value = "file"
-        await pilot.pause()
-        app.query_one("#query", Input).value = str(query_path)
-        app.query_one("#file-filters", Input).value = "format:wav"
+        app.query_one("#query", Input).value = "reference.wav format:wav"
 
         await pilot.press("enter")
         await app.workers.wait_for_complete()
         await pilot.pause()
 
         assert len(audios) == 1
+        assert images == []
         assert audios[0].texts == []
         assert len(audios[0].audio_inputs) == 1
+        assert app.query_one(QueryBar).attached_file == query_path.resolve()
+        assert app.query_one("#target", Select).value == "audio"
         assert repository.calls[0]["scope"] == "segment"
         assert repository.calls[0]["limit"] == (
             10 * SEGMENT_GROUP_OVERFETCH_FACTOR
@@ -627,11 +822,11 @@ async def test_tui_help_tracks_selected_target(tmp_path: Path) -> None:
     async with app.run_test(size=(100, 32)) as pilot:
         target = app.query_one("#target", Select)
         query = app.query_one("#query", Input)
-        assert query.placeholder == "Describe image…"
+        assert query.placeholder == "Describe image or enter a file path…"
         assert not target.disabled
         target.value = "audio"
         await pilot.pause()
-        assert query.placeholder == "Describe audio…"
+        assert query.placeholder == "Describe audio or enter a file path…"
         await pilot.press("f1")
         await pilot.pause()
 
@@ -643,6 +838,45 @@ async def test_tui_help_tracks_selected_target(tmp_path: Path) -> None:
         await pilot.press("escape")
         await pilot.pause()
         assert app.query_one("#query", Input).has_focus
+
+
+@pytest.mark.anyio
+async def test_tui_clears_incompatible_file_when_target_changes(
+    tmp_path: Path,
+) -> None:
+    query_path = tmp_path / "reference.png"
+    Image.new("RGB", (8, 8)).save(query_path)
+    repository = RecordingSearchRepository()
+    session = SearchService(
+        repository,  # type: ignore[arg-type]
+        {
+            "image": handler("image", RecordingImageEmbedding),
+            "audio": handler("audio", RecordingAudioEmbedding),
+        },
+        ("image", "audio"),
+    )
+    app = FileLoreSearchApp(
+        session,
+        limit=20,
+        working_directory=tmp_path,
+    )
+
+    async with app.run_test(size=(100, 32)) as pilot:
+        query_bar = app.query_one(QueryBar)
+        query_bar.attach_file(query_path)
+        query_bar.value = "format:png"
+
+        app.query_one("#target", Select).value = "audio"
+        await pilot.pause()
+
+        assert query_bar.attached_file is None
+        assert query_bar.value == "format:png"
+        assert "Reference file cleared" in str(
+            app.query_one("#status", Static).content
+        )
+        assert query_bar.input.placeholder == (
+            "Describe audio or enter a file path…"
+        )
 
 
 @pytest.mark.anyio
@@ -700,8 +934,7 @@ async def test_tui_recovers_controls_after_background_search_failure(
         assert "Search failed: database unavailable" in str(status.content)
         assert status.has_class("error")
         assert not query.disabled
-        assert not app.query_one("#file-filters", Input).disabled
-        assert not app.query_one("#query-mode", Select).disabled
+        assert not app.query_one("#clear-query-file", Button).disabled
         assert not app.query_one("#limit", Select).disabled
         assert app.query_one("#target", Select).disabled
         assert query.has_focus

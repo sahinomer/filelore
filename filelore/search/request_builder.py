@@ -22,36 +22,106 @@ from filelore.search.query_parser import (
 def build_interactive_search_request(
     value: str,
     *,
-    mode: str,
     target: str,
-    file_filters: str = "",
     file_query_vectorizers: Mapping[str, FileQueryVectorizer] | None = None,
+    query_file: Path | None = None,
+    base_directory: Path | None = None,
 ) -> SearchRequest:
-    """Build a validated request from the TUI's text or file input fields."""
-    if mode == "text":
+    """Build a TUI request from unified text, file, and filter input."""
+    vectorizers = file_query_vectorizers or {}
+    if query_file is None:
         parsed = parse_search_query(value)
-        request = SearchRequest(
-            source=SearchSource.from_text(parsed.semantic_query),
-            target=target,
-            metadata_query=parsed.metadata_query,
-            filters=parsed.filters,
+        detected = _detect_interactive_query_file(
+            parsed.semantic_query,
+            vectorizers,
+            base_directory=base_directory,
         )
-    elif mode == "file":
-        vectorizer = (file_query_vectorizers or {}).get(target)
-        if vectorizer is None:
-            raise ValueError(f"File similarity search is not enabled for {target}")
-        path = validate_query_file(Path(value), vectorizer.supported_extensions)
-        parsed_filters = parse_search_filters(file_filters)
+        if detected is None:
+            request = SearchRequest(
+                source=SearchSource.from_text(parsed.semantic_query),
+                target=target,
+                metadata_query=parsed.metadata_query,
+                filters=parsed.filters,
+            )
+        else:
+            path, file_target = detected
+            request = SearchRequest(
+                source=SearchSource.from_file(path),
+                target=file_target,
+                metadata_query=parsed.metadata_query,
+                filters=parsed.filters,
+            )
+    else:
+        path, file_target = _prepare_interactive_query_file(
+            query_file,
+            vectorizers,
+            base_directory=base_directory,
+        )
+        parsed_filters = parse_search_filters(value)
         request = SearchRequest(
             source=SearchSource.from_file(path),
-            target=target,
+            target=file_target,
             metadata_query=parsed_filters.metadata_query,
             filters=parsed_filters.filters,
         )
-    else:
-        raise ValueError("Search mode must be text or file")
     validate_search_metadata(request.metadata_query, request.target)
     return request
+
+
+def _detect_interactive_query_file(
+    value: str,
+    file_query_vectorizers: Mapping[str, FileQueryVectorizer],
+    *,
+    base_directory: Path | None,
+) -> tuple[Path, str] | None:
+    candidate = _resolve_query_path(value, base_directory)
+    if not candidate.is_file():
+        if _looks_like_file_path(value):
+            raise ValueError(f"Query file does not exist: {candidate}")
+        return None
+    return _prepare_interactive_query_file(
+        candidate,
+        file_query_vectorizers,
+        base_directory=None,
+    )
+
+
+def _prepare_interactive_query_file(
+    path: Path,
+    file_query_vectorizers: Mapping[str, FileQueryVectorizer],
+    *,
+    base_directory: Path | None,
+) -> tuple[Path, str]:
+    candidate = _resolve_query_path(path, base_directory)
+    file_target = target_for_format(candidate.suffix)
+    if file_target is None:
+        extension = candidate.suffix or "<none>"
+        raise ValueError(f"Unsupported query file extension: {extension}")
+    vectorizer = file_query_vectorizers.get(file_target)
+    if vectorizer is None:
+        raise ValueError(f"File similarity search is not enabled for {file_target}")
+    return (
+        validate_query_file(candidate, vectorizer.supported_extensions),
+        file_target,
+    )
+
+
+def _resolve_query_path(value: str | Path, base_directory: Path | None) -> Path:
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute() and base_directory is not None:
+        candidate = base_directory / candidate
+    return candidate
+
+
+def _looks_like_file_path(value: str) -> bool:
+    candidate = Path(value).expanduser()
+    return (
+        candidate.is_absolute()
+        or value.startswith((".", "~"))
+        or "/" in value
+        or "\\" in value
+        or target_for_format(candidate.suffix) is not None
+    )
 
 
 def build_structured_search_request(

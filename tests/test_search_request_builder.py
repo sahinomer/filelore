@@ -27,7 +27,6 @@ class ExampleFileVectorizer:
 def test_interactive_text_request_separates_semantics_and_filters() -> None:
     request = build_interactive_search_request(
         "  orange cat format:png min-res:640x480  ",
-        mode="text",
         target="image",
     )
 
@@ -44,21 +43,50 @@ def test_interactive_text_request_separates_semantics_and_filters() -> None:
 def test_interactive_file_request_validates_path_and_filter_only_input(
     tmp_path: Path,
 ) -> None:
-    query_path = tmp_path / "reference.example"
+    query_path = tmp_path / "reference.png"
     query_path.write_bytes(b"query")
 
     request = build_interactive_search_request(
-        str(query_path),
-        mode="file",
+        "name:holiday after:2025",
         target="image",
-        file_filters="name:holiday after:2025",
         file_query_vectorizers={"image": ExampleFileVectorizer()},
+        query_file=query_path,
     )
 
     assert request.source.file == query_path.resolve()
     assert request.source.text is None
     assert request.metadata_query.name_contains == "holiday"
     assert request.filters == (("name", "holiday"), ("after", "2025"))
+
+
+def test_interactive_request_detects_relative_file_and_infers_target(
+    tmp_path: Path,
+) -> None:
+    query_path = tmp_path / "reference.png"
+    query_path.write_bytes(b"query")
+
+    request = build_interactive_search_request(
+        "reference.png name:holiday",
+        target="audio",
+        file_query_vectorizers={"image": ExampleFileVectorizer()},
+        base_directory=tmp_path,
+    )
+
+    assert request.source.file == query_path.resolve()
+    assert request.target == "image"
+    assert request.filters == (("name", "holiday"),)
+
+
+def test_interactive_request_reports_missing_path_like_query(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="Query file does not exist"):
+        build_interactive_search_request(
+            "missing/reference.png",
+            target="image",
+            file_query_vectorizers={"image": ExampleFileVectorizer()},
+            base_directory=tmp_path,
+        )
 
 
 def test_structured_request_builds_text_source_target_and_metadata() -> None:

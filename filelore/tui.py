@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Mapping, Sequence
 
 from rich.table import Table
@@ -26,7 +27,9 @@ from filelore.search import (
     SearchService,
     SearchTarget,
     build_interactive_search_request,
+    target_for_format,
 )
+from filelore.ui import FilePickerScreen, QueryBar
 
 
 class QueryHelpScreen(ModalScreen[None]):
@@ -132,6 +135,7 @@ class FileLoreSearchApp(App[None]):
     BINDINGS = [
         ("ctrl+q", "quit", "Quit"),
         ("ctrl+l", "clear_search", "Clear"),
+        ("ctrl+o", "open_file_picker", "Open file"),
         ("f1", "query_help", "Help"),
         ("escape", "focus_search", "Search"),
     ]
@@ -156,16 +160,9 @@ class FileLoreSearchApp(App[None]):
         margin-right: 1;
     }
 
-    #query-mode {
-        width: 12;
-        height: 3;
-        margin-right: 1;
-    }
-
-    #query {
+    #query-bar {
         width: 1fr;
         height: 3;
-        border: tall $accent;
     }
 
     #limit-label {
@@ -189,15 +186,6 @@ class FileLoreSearchApp(App[None]):
 
     #active-filters {
         color: $accent;
-    }
-
-    #file-filters {
-        height: 3;
-        margin-bottom: 1;
-    }
-
-    .hidden {
-        display: none;
     }
 
     #status {
@@ -246,13 +234,18 @@ class FileLoreSearchApp(App[None]):
     }
     """
 
-    def __init__(self, session: SearchService, *, limit: int) -> None:
+    def __init__(
+        self,
+        session: SearchService,
+        *,
+        limit: int,
+        working_directory: Path | None = None,
+    ) -> None:
         super().__init__()
         self.session = session
         self.initial_limit = limit
+        self.working_directory = (working_directory or Path.cwd()).resolve()
         self._searching = False
-        self._query_mode = "text"
-        self._query_values = {"text": "", "file": ""}
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -264,15 +257,9 @@ class FileLoreSearchApp(App[None]):
                     allow_blank=False,
                     id="target",
                 )
-                yield Select[str](
-                    self._query_mode_options(self.session.default_target),
-                    value="text",
-                    allow_blank=False,
-                    id="query-mode",
-                )
-                yield Input(
-                    placeholder="Describe a file…",
-                    id="query",
+                yield QueryBar(
+                    working_directory=self.working_directory,
+                    supported_extensions=self._supported_file_extensions(),
                 )
                 yield Static("Limit", id="limit-label")
                 yield Select[int](
@@ -281,11 +268,6 @@ class FileLoreSearchApp(App[None]):
                     allow_blank=False,
                     id="limit",
                 )
-            yield Input(
-                placeholder="Optional result filters, such as format:png",
-                id="file-filters",
-                classes="hidden",
-            )
             yield Static("", id="active-filters")
             yield Static("", id="status")
             with VerticalScroll(id="results-scroll"):
@@ -296,32 +278,36 @@ class FileLoreSearchApp(App[None]):
     def on_mount(self) -> None:
         target_select = self.query_one("#target", Select)
         target_select.disabled = len(self.session.targets) == 1
-        self._update_query_placeholder(
-            self.session.default_target,
-            self._query_mode,
-        )
-        self.query_one("#query", Input).focus()
+        query_bar = self.query_one(QueryBar)
+        query_bar.update_placeholder(self.session.default_target)
+        query_bar.input.focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if self._searching:
             return
+        query_bar = self.query_one(QueryBar)
         try:
             request = build_interactive_search_request(
-                self.query_one("#query", Input).value,
-                mode=self._query_mode,
+                query_bar.value,
                 target=self._selected_target(),
-                file_filters=self.query_one("#file-filters", Input).value,
                 file_query_vectorizers=self.session.file_query_vectorizers,
+                query_file=query_bar.attached_file,
+                base_directory=self.working_directory,
             )
         except ValueError as error:
             self._show_error(str(error))
             return
 
+        if request.source.file is not None:
+            query_bar.attach_file(request.source.file)
+            query_bar.value = _format_filters(request.filters)
+            target_select = self.query_one("#target", Select)
+            if target_select.value != request.target:
+                target_select.value = request.target
+            query_bar.update_placeholder(request.target)
         self._show_filters(request.filters)
         self._searching = True
-        self.query_one("#query", Input).disabled = True
-        self.query_one("#file-filters", Input).disabled = True
-        self.query_one("#query-mode", Select).disabled = True
+        query_bar.set_controls_disabled(True)
         limit_select = self.query_one("#limit", Select)
         limit_select.disabled = True
         self.query_one("#target", Select).disabled = True
@@ -417,15 +403,13 @@ class FileLoreSearchApp(App[None]):
 
     def _finish_search(self) -> None:
         self._searching = False
-        query = self.query_one("#query", Input)
-        query.disabled = False
-        self.query_one("#file-filters", Input).disabled = False
-        self.query_one("#query-mode", Select).disabled = False
+        query_bar = self.query_one(QueryBar)
+        query_bar.set_controls_disabled(False)
         self.query_one("#limit", Select).disabled = False
         self.query_one("#target", Select).disabled = (
             len(self.session.targets) == 1
         )
-        query.focus()
+        query_bar.input.focus()
 
     def _set_status(self, message: str, class_name: str | None = None) -> None:
         status = self.query_one("#status", Static)
@@ -433,36 +417,71 @@ class FileLoreSearchApp(App[None]):
         status.update(message)
 
     async def action_clear_search(self) -> None:
-        query = self.query_one("#query", Input)
-        query.value = ""
-        self._query_values = {"text": "", "file": ""}
-        self.query_one("#file-filters", Input).value = ""
+        query_bar = self.query_one(QueryBar)
+        query_bar.clear()
         self.query_one("#active-filters", Static).update("")
         results = self.query_one("#results", Vertical)
         await results.remove_children()
         await results.mount(Static("Search results will appear here."))
         self._set_status("")
-        query.focus()
+        query_bar.input.focus()
 
     def action_focus_search(self) -> None:
-        self.query_one("#query", Input).focus()
+        self.query_one(QueryBar).input.focus()
 
     def action_query_help(self) -> None:
         self.push_screen(QueryHelpScreen(self._selected_target()))
 
+    def action_open_file_picker(self) -> None:
+        if self._searching:
+            return
+        self.push_screen(
+            FilePickerScreen(
+                self.working_directory,
+                self._supported_file_extensions(),
+            ),
+            self._attach_query_file,
+        )
+
+    def on_query_bar_browse_requested(
+        self,
+        _: QueryBar.BrowseRequested,
+    ) -> None:
+        self.action_open_file_picker()
+
+    def _attach_query_file(self, path: Path | None) -> None:
+        if path is None:
+            self.query_one(QueryBar).input.focus()
+            return
+
+        target = target_for_format(path.suffix)
+        if target is None or target not in self.session.file_query_vectorizers:
+            self._show_error(f"Unsupported query file format: {path.suffix}")
+            return
+
+        target_select = self.query_one("#target", Select)
+        if target_select.value != target:
+            target_select.value = target
+        query_bar = self.query_one(QueryBar)
+        query_bar.value = ""
+        query_bar.attach_file(path)
+        query_bar.update_placeholder(target)
+        self._set_status("")
+        query_bar.input.focus()
+
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "target" and isinstance(event.value, str):
-            mode_select = self.query_one("#query-mode", Select)
-            mode_select.set_options(self._query_mode_options(event.value))
+            query_bar = self.query_one(QueryBar)
+            attached_file = query_bar.attached_file
             if (
-                self._query_mode == "file"
-                and event.value not in self.session.file_query_vectorizers
+                attached_file is not None
+                and target_for_format(attached_file.suffix) != event.value
             ):
-                mode_select.value = "text"
-                self._switch_query_mode("text")
-            self._update_query_placeholder(event.value, self._query_mode)
-        elif event.select.id == "query-mode" and isinstance(event.value, str):
-            self._switch_query_mode(event.value)
+                query_bar.clear_file()
+                self._set_status(
+                    "Reference file cleared because the target changed"
+                )
+            query_bar.update_placeholder(event.value)
 
     def _limit_options(self) -> tuple[tuple[str, int], ...]:
         limits = sorted({*self.LIMIT_PRESETS, self.initial_limit})
@@ -475,11 +494,12 @@ class FileLoreSearchApp(App[None]):
             for target in self.session.targets
         )
 
-    def _query_mode_options(self, target: str) -> tuple[tuple[str, str], ...]:
-        options = [("Text", "text")]
-        if target in self.session.file_query_vectorizers:
-            options.append(("File", "file"))
-        return tuple(options)
+    def _supported_file_extensions(self) -> frozenset[str]:
+        return frozenset(
+            extension
+            for vectorizer in self.session.file_query_vectorizers.values()
+            for extension in vectorizer.supported_extensions
+        )
 
     def _selected_target(self) -> str:
         selected = self.query_one("#target", Select).value
@@ -488,30 +508,6 @@ class FileLoreSearchApp(App[None]):
             if isinstance(selected, str)
             else self.session.default_target
         )
-
-    def _switch_query_mode(self, mode: str) -> None:
-        if mode == self._query_mode:
-            return
-        query = self.query_one("#query", Input)
-        self._query_values[self._query_mode] = query.value
-        self._query_mode = mode
-        query.value = self._query_values[mode]
-        file_filters = self.query_one("#file-filters", Input)
-        if mode == "file":
-            file_filters.remove_class("hidden")
-        else:
-            file_filters.add_class("hidden")
-        self._update_query_placeholder(self._selected_target(), mode)
-        query.focus()
-
-    def _update_query_placeholder(self, target: str, mode: str) -> None:
-        label = "image" if target == "image" else "audio"
-        placeholder = (
-            f"Path to reference {label}…"
-            if mode == "file"
-            else f"Describe {label}…"
-        )
-        self.query_one("#query", Input).placeholder = placeholder
 
     def on_unmount(self) -> None:
         self.session.close()
@@ -540,8 +536,11 @@ def run_interactive_search(
 
 def _query_help_text(target: str) -> str:
     shared = (
-        "Write a natural description, then add optional key:value filters. "
-        "Quote values that contain spaces.\n\n"
+        "Write a natural description or enter a reference file path. Add "
+        "optional key:value filters in the same field. Relative paths start "
+        "from the terminal working directory. Press Tab or Right to accept a "
+        "path completion, or Ctrl+O to browse. Quote values that contain "
+        "spaces.\n\n"
         "Shared filters\n"
         "name:holiday          File name contains text\n"
         "format:png            File format\n"
@@ -556,8 +555,7 @@ def _query_help_text(target: str) -> str:
             "longer-than:1.5    Duration greater than seconds\n"
             "shorter-than:30    Duration less than seconds\n\n"
             "Text example: glass breaking format:wav longer-than:1\n"
-            "File mode: enter a reference audio path, then put optional "
-            "filters in the separate filter field."
+            "File example: samples/crash.wav format:wav longer-than:1"
         )
     else:
         specific = (
@@ -565,13 +563,23 @@ def _query_help_text(target: str) -> str:
             "min-res:1280x720   Minimum image resolution\n"
             "max-res:3840x2160  Maximum image resolution\n\n"
             "Text example: cat on a balcony format:jpg after:2025\n"
-            "File mode: enter a reference image path, then put optional "
-            "filters in the separate filter field."
+            "File example: samples/cat.jpg format:jpeg after:2025"
         )
     dates = (
         "\n\nDates accept YYYY, YYYY-MM, YYYY-MM-DD, or an ISO datetime."
     )
     return shared + specific + dates
+
+
+def _format_filters(filters: Sequence[tuple[str, str]]) -> str:
+    tokens: list[str] = []
+    for key, value in filters:
+        token = f"{key}:{value}"
+        if any(character.isspace() for character in token):
+            quote = '"' if '"' not in token else "'"
+            token = f"{quote}{token}{quote}"
+        tokens.append(token)
+    return " ".join(tokens)
 
 
 def _chunk_matches_renderable(

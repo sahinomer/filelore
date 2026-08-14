@@ -60,6 +60,28 @@ def test_file_query_filters_reject_unqualified_text() -> None:
 
 
 @pytest.mark.parametrize(
+    "query",
+    [
+        r"C:\Audio\rain.wav longer-than:1",
+        r'"C:\Audio Files\rain.wav" longer-than:1',
+    ],
+)
+def test_query_parser_preserves_windows_file_paths(query: str) -> None:
+    parsed = parse_search_query(query)
+
+    assert parsed.semantic_query.endswith(r"rain.wav")
+    assert "\\" in parsed.semantic_query
+    assert parsed.filters == (("longer-than", "1"),)
+
+
+def test_query_parser_preserves_apostrophes_in_semantic_text() -> None:
+    parsed = parse_search_query("cat's portrait format:png")
+
+    assert parsed.semantic_query == "cat's portrait"
+    assert parsed.filters == (("format", "png"),)
+
+
+@pytest.mark.parametrize(
     ("filter_text", "metadata_field", "expected"),
     [
         ("after:2025", "modified_after", datetime(2025, 1, 1).astimezone()),
@@ -173,6 +195,7 @@ def test_interactive_query_validates_filters_for_selected_target(
         ("rain shorter-than:0", "must be positive"),
         ("rain longer-than:nan", "must be non-negative"),
         ("rain shorter-than:inf", "must be positive"),
+        ('"rain without an ending quote', "No closing quotation"),
         (
             "rain longer-than:30 shorter-than:10",
             "longer-than must be less",

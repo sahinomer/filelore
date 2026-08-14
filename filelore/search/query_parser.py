@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 import re
-import shlex
 from dataclasses import dataclass
 from datetime import date, datetime, time
 
@@ -27,6 +26,7 @@ _FILTER_KEYS = frozenset(
     }
 )
 _FILTER_TOKEN = re.compile(r"^(?P<key>[A-Za-z][A-Za-z-]*):(?P<value>.*)$")
+_WINDOWS_ABSOLUTE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
 _YEAR = re.compile(r"^\d{4}$")
 _MONTH = re.compile(r"^\d{4}-\d{2}$")
 _DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -121,16 +121,13 @@ def target_for_format(file_format: str) -> str | None:
 def _split_search_tokens(
     value: str,
 ) -> tuple[list[str], dict[str, str], list[tuple[str, str]]]:
-    try:
-        tokens = shlex.split(value)
-    except ValueError as error:
-        raise ValueError(f"Invalid query quoting: {error}") from error
+    tokens = _tokenize_search_value(value)
     semantic_tokens: list[str] = []
     filter_values: dict[str, str] = {}
     filters: list[tuple[str, str]] = []
     for token in tokens:
         match = _FILTER_TOKEN.match(token)
-        if match is None:
+        if match is None or _WINDOWS_ABSOLUTE_PATH.match(token):
             semantic_tokens.append(token)
             continue
         key = match.group("key").casefold()
@@ -144,6 +141,34 @@ def _split_search_tokens(
         filter_values[key] = raw_value
         filters.append((key, raw_value))
     return semantic_tokens, filter_values, filters
+
+
+def _tokenize_search_value(value: str) -> list[str]:
+    """Split query tokens while preserving Windows path separators."""
+    tokens: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    for character in value:
+        if quote is not None:
+            if character == quote:
+                quote = None
+            else:
+                current.append(character)
+        elif character in {'"', "'"} and (
+            not current or current[-1] == ":"
+        ):
+            quote = character
+        elif character.isspace():
+            if current:
+                tokens.append("".join(current))
+                current = []
+        else:
+            current.append(character)
+    if quote is not None:
+        raise ValueError("Invalid query quoting: No closing quotation")
+    if current:
+        tokens.append("".join(current))
+    return tokens
 
 
 def _metadata_query(filter_values: dict[str, str]) -> FileMetadataQuery:
