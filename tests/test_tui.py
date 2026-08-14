@@ -23,6 +23,7 @@ from filelore.index import (
     IndexHandler,
 )
 from filelore.search_query import parse_search_query
+from filelore.search import ImageFileQueryVectorizer, SearchSource
 from filelore.tui import (
     AUDIO_OVERFETCH_FACTOR,
     FileLoreSearchApp,
@@ -46,12 +47,14 @@ class RecordingImageEmbedding(ImageEmbedding):
             dimensions=3,
         )
         self.texts: list[str] = []
+        self.images: list[Path] = []
         self.close_count = 0
 
     def predict_batch(
         self,
         items: Sequence[str | Path | Image.Image],
     ) -> tuple[EmbeddingVector, ...]:
+        self.images.extend(Path(item) for item in items if not isinstance(item, Image.Image))
         return tuple((1.0, 0.0, 0.0) for _ in items)
 
     def predict_text_batch(
@@ -189,7 +192,11 @@ def file_entry(path: Path, *, file_type: str, entry_id: str) -> FileIndexEntry:
 
 def image_result(path: Path, *, score: float = 0.8) -> FileSearchResult:
     return FileSearchResult(
-        file=file_entry(path, file_type="image", entry_id="image-result"),
+        file=file_entry(
+            path,
+            file_type="image",
+            entry_id=f"image-{path.name}",
+        ),
         score=score,
     )
 
@@ -225,6 +232,7 @@ def image_session(
         repository,  # type: ignore[arg-type]
         {"image": handler("image", factory)},
         ("image",),
+        file_query_vectorizers={"image": ImageFileQueryVectorizer()},
     )
 
 
@@ -297,6 +305,41 @@ async def test_tui_searches_only_after_enter_and_reuses_active_model(
 
 
 @pytest.mark.anyio
+async def test_tui_searches_for_images_similar_to_a_file(
+    tmp_path: Path,
+) -> None:
+    query_path = tmp_path / "reference.png"
+    Image.new("RGB", (8, 8), color=(20, 40, 60)).save(query_path)
+    repository = RecordingSearchRepository(
+        file_results=(image_result(tmp_path / "similar.png"),)
+    )
+    created: list[RecordingImageEmbedding] = []
+    app = FileLoreSearchApp(image_session(repository, created), limit=10)
+
+    async with app.run_test(size=(110, 36)) as pilot:
+        mode = app.query_one("#query-mode", Select)
+        mode.value = "file"
+        await pilot.pause()
+        query = app.query_one("#query", Input)
+        query.value = str(query_path)
+        app.query_one("#file-filters", Input).value = "format:png"
+
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert len(created) == 1
+        assert created[0].texts == []
+        assert created[0].images == [query_path.resolve()]
+        assert repository.calls[0]["scope"] == "file"
+        assert repository.calls[0]["metadata_filter"] is not None
+        assert "format:png" in str(
+            app.query_one("#active-filters", Static).content
+        )
+        assert "Found 1 file" in str(app.query_one("#status", Static).content)
+
+
+@pytest.mark.anyio
 async def test_tui_keeps_result_cards_clear_of_the_vertical_scrollbar(
     tmp_path: Path,
 ) -> None:
@@ -309,7 +352,7 @@ async def test_tui_keeps_result_cards_clear_of_the_vertical_scrollbar(
     created: list[RecordingImageEmbedding] = []
     app = FileLoreSearchApp(image_session(repository, created), limit=20)
 
-    async with app.run_test(size=(104, 38)) as pilot:
+    async with app.run_test(size=(104, 32)) as pilot:
         app.query_one("#query", Input).value = "cat"
         await pilot.press("enter")
         await app.workers.wait_for_complete()
@@ -360,12 +403,30 @@ def test_session_switches_models_only_when_a_new_target_is_searched(
     )
 
     assert images == [] and audios == []
-    session.search(parse_search_query("orange cat"), "image", 10)
-    session.search(parse_search_query("blue dog"), "image", 10)
+    orange = parse_search_query("orange cat")
+    blue = parse_search_query("blue dog")
+    session.search(
+        SearchSource.from_text(orange.semantic_query),
+        orange.metadata_query,
+        "image",
+        10,
+    )
+    session.search(
+        SearchSource.from_text(blue.semantic_query),
+        blue.metadata_query,
+        "image",
+        10,
+    )
     assert len(images) == 1 and images[0].close_count == 0
     assert audios == []
 
-    session.search(parse_search_query("glass breaking"), "audio", 10)
+    glass = parse_search_query("glass breaking")
+    session.search(
+        SearchSource.from_text(glass.semantic_query),
+        glass.metadata_query,
+        "audio",
+        10,
+    )
     assert images[0].close_count == 1
     assert len(audios) == 1 and audios[0].close_count == 0
     assert session.active_target == "audio"

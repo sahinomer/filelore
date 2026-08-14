@@ -24,6 +24,7 @@ from filelore.embedding import (
     ImageEmbedding,
 )
 from filelore.index import FileIndexRepository, IndexHandler
+from filelore.search import FileQueryVectorizer
 from filelore.storage import QdrantVectorDatabase
 
 
@@ -189,6 +190,16 @@ def test_cli_parses_semantic_query_and_optional_search_filters() -> None:
     assert args.max_resolution == "3840x2160"
     assert args.modified_after == "2025-01-01"
     assert args.modified_before == "2025-12-31"
+
+
+def test_cli_accepts_a_file_similarity_query() -> None:
+    args = build_argument_parser().parse_args(
+        ["--query-file", "reference.png", "--limit", "10"]
+    )
+
+    assert args.query is None
+    assert args.query_file == Path("reference.png")
+    assert args.limit == 10
 
 
 def test_cli_parses_audio_target_and_metadata_filters() -> None:
@@ -755,7 +766,7 @@ def test_cli_requires_a_query_when_not_indexing(
 
     captured = capsys.readouterr()
     assert exit_code == 2
-    assert "Search query is required unless --index is used" in captured.err
+    assert "text query or --query-file is required" in captured.err
 
 
 def test_cli_search_requires_a_target_when_format_cannot_infer_one(
@@ -766,6 +777,31 @@ def test_cli_search_requires_a_target_when_format_cannot_infer_one(
     captured = capsys.readouterr()
     assert exit_code == 2
     assert "Search file type is required" in captured.err
+
+
+def test_cli_file_query_requires_an_existing_supported_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    missing = tmp_path / "missing.png"
+
+    exit_code = main(["--query-file", str(missing)])
+
+    assert exit_code == 2
+    assert "Query file does not exist" in capsys.readouterr().err
+
+
+def test_cli_rejects_text_and_file_queries_together(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    query_file = tmp_path / "reference.png"
+    create_image(query_file)
+
+    exit_code = main(["red", "--query-file", str(query_file)])
+
+    assert exit_code == 2
+    assert "cannot be combined" in capsys.readouterr().err
 
 
 def test_cli_rejects_a_target_that_conflicts_with_format(
@@ -845,11 +881,13 @@ def test_cli_without_arguments_opens_interactive_search_on_a_terminal(
     def interactive_runner(
         file_index: object,
         handlers: Mapping[str, IndexHandler],
+        file_query_vectorizers: Mapping[str, FileQueryVectorizer],
         allowed_targets: Sequence[str],
         limit: int,
     ) -> int:
         assert file_index is not None
         assert factory_calls == []
+        assert tuple(file_query_vectorizers) == ("image",)
         runner_calls.append(
             (tuple(handlers), tuple(allowed_targets), limit)
         )
@@ -891,11 +929,13 @@ def test_interactive_target_constrains_tui_without_loading_a_model(
     def interactive_runner(
         file_index: object,
         handlers: Mapping[str, IndexHandler],
+        file_query_vectorizers: Mapping[str, FileQueryVectorizer],
         allowed_targets: Sequence[str],
         limit: int,
     ) -> int:
         assert file_index is not None
         assert tuple(handlers) == ("image", "audio")
+        assert tuple(file_query_vectorizers) == ("image",)
         assert limit == DEFAULT_RESULT_LIMIT
         assert factory_calls == []
         runner_calls.append(tuple(allowed_targets))
@@ -1056,6 +1096,48 @@ def test_cli_indexes_embeddings_and_searches_by_semantic_description(
     assert "raw cosine similarity" in captured.out
     assert "2 results" in captured.out
     assert "Timing" in captured.out
+
+
+def test_cli_searches_for_images_similar_to_a_query_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database_path = tmp_path / "qdrant-index"
+    indexed = tmp_path / "indexed"
+    red_path = indexed / "red.png"
+    blue_path = indexed / "blue.png"
+    query_path = tmp_path / "reference-blue.png"
+    create_image(red_path)
+    Image.new("RGB", (8, 8), color=(0, 0, 255)).save(blue_path)
+    Image.new("RGB", (8, 8), color=(0, 0, 255)).save(query_path)
+
+    assert main(
+        [
+            "--index",
+            str(indexed),
+            "--yes",
+            "--index-path",
+            str(database_path),
+        ],
+        image_embedding_factory=ColorCliEmbedding,
+    ) == 0
+    capsys.readouterr()
+
+    exit_code = main(
+        [
+            "--query-file",
+            str(query_path),
+            "--index-path",
+            str(database_path),
+        ],
+        image_embedding_factory=ColorCliEmbedding,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out.index(blue_path.name) < captured.out.index(red_path.name)
+    assert "Files similar to" in captured.out
+    assert query_path.name in captured.out
 
 
 def test_cli_searches_raw_audio_chunks_with_metadata_filters(

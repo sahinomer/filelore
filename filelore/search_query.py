@@ -39,8 +39,15 @@ class ParsedSearchQuery:
     filters: tuple[tuple[str, str], ...] = ()
 
 
-def parse_search_query(value: str) -> ParsedSearchQuery:
-    """Split semantic text from supported ``key:value`` metadata filters."""
+@dataclass(frozen=True, slots=True)
+class ParsedSearchFilters:
+    metadata_query: FileMetadataQuery
+    filters: tuple[tuple[str, str], ...] = ()
+
+
+def _split_search_tokens(
+    value: str,
+) -> tuple[list[str], dict[str, str], list[tuple[str, str]]]:
     try:
         tokens = shlex.split(value)
     except ValueError as error:
@@ -66,9 +73,37 @@ def parse_search_query(value: str) -> ParsedSearchQuery:
         filter_values[key] = raw_value
         filters.append((key, raw_value))
 
+    return semantic_tokens, filter_values, filters
+
+
+def parse_search_query(value: str) -> ParsedSearchQuery:
+    """Split semantic text from supported ``key:value`` metadata filters."""
+    semantic_tokens, filter_values, filters = _split_search_tokens(value)
+
     semantic_query = " ".join(semantic_tokens).strip()
     if not semantic_query:
         raise ValueError("Semantic search text is required")
+
+    return ParsedSearchQuery(
+        semantic_query=semantic_query,
+        metadata_query=_metadata_query(filter_values),
+        filters=tuple(filters),
+    )
+
+
+def parse_search_filters(value: str) -> ParsedSearchFilters:
+    """Parse filter-only input used alongside a separate file query."""
+    semantic_tokens, filter_values, filters = _split_search_tokens(value)
+    if semantic_tokens:
+        raise ValueError("File search filters must use key:value syntax")
+    return ParsedSearchFilters(
+        metadata_query=_metadata_query(filter_values),
+        filters=tuple(filters),
+    )
+
+
+def _metadata_query(filter_values: dict[str, str]) -> FileMetadataQuery:
+    """Validate parsed values and build the repository metadata query."""
 
     min_width, min_height = _parse_resolution_filter(
         filter_values.get("min-res"), "min-res"
@@ -119,23 +154,19 @@ def parse_search_query(value: str) -> ParsedSearchQuery:
     ):
         raise ValueError("longer-than must be less than shorter-than")
 
-    return ParsedSearchQuery(
-        semantic_query=semantic_query,
-        metadata_query=FileMetadataQuery(
-            name_contains=filter_values.get("name"),
-            file_format=filter_values.get("format"),
-            min_width=min_width,
-            min_height=min_height,
-            max_width=max_width,
-            max_height=max_height,
-            sample_rate_hz=sample_rate,
-            bitrate_bps=bitrate,
-            duration_longer_than=longer_than,
-            duration_shorter_than=shorter_than,
-            modified_after=modified_after,
-            modified_before=modified_before,
-        ),
-        filters=tuple(filters),
+    return FileMetadataQuery(
+        name_contains=filter_values.get("name"),
+        file_format=filter_values.get("format"),
+        min_width=min_width,
+        min_height=min_height,
+        max_width=max_width,
+        max_height=max_height,
+        sample_rate_hz=sample_rate,
+        bitrate_bps=bitrate,
+        duration_longer_than=longer_than,
+        duration_shorter_than=shorter_than,
+        modified_after=modified_after,
+        modified_before=modified_before,
     )
 
 
@@ -144,7 +175,14 @@ def validate_search_target(
     target: str,
 ) -> None:
     """Reject metadata filters incompatible with the selected file type."""
-    query = parsed_query.metadata_query
+    validate_search_metadata(parsed_query.metadata_query, target)
+
+
+def validate_search_metadata(
+    query: FileMetadataQuery,
+    target: str,
+) -> None:
+    """Reject metadata filters incompatible with the selected file type."""
     if target == "audio" and (
         query.min_width is not None
         or query.min_height is not None

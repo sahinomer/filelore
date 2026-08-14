@@ -50,7 +50,7 @@ class SearchSource:
         if self.text is not None:
             return self.text
         assert self.file is not None
-        return str(self.file)
+        return self.file.name
 
 
 class FileQueryVectorizer(Protocol):

@@ -19,7 +19,6 @@ from filelore.embedding import (
     ClapAudioEmbedding,
     ClipImageEmbedding,
     ImageEmbedding,
-    TextEmbedding,
 )
 from filelore.index import (
     FileIndexRepository,
@@ -33,16 +32,25 @@ from filelore.index import (
 )
 from filelore.metadata import AudioMetadataParser, ImageMetadataParser
 from filelore.processors import AudioProcessor, ImageProcessor
+from filelore.search import (
+    FileQueryVectorizer,
+    ImageFileQueryVectorizer,
+    SearchSource,
+    embed_search_source,
+    search_vectors,
+    validate_query_file,
+)
 from filelore.storage import QdrantVectorDatabase, VectorDatabase
 
 
-EmbeddingFactory = Callable[[], TextEmbedding[Any]]
+EmbeddingFactory = Callable[[], BaseEmbedding[Any]]
 ImageEmbeddingFactory = Callable[[], ImageEmbedding]
 AudioEmbeddingFactory = Callable[[], AudioEmbedding]
 InteractiveRunner = Callable[
     [
         FileIndexRepository,
         Mapping[str, IndexHandler],
+        Mapping[str, FileQueryVectorizer],
         Sequence[str],
         int,
     ],
@@ -99,6 +107,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
 
     search_options = parser.add_argument_group("search options")
+    search_options.add_argument(
+        "--query-file",
+        type=Path,
+        metavar="PATH",
+        help="find files similar to an image or audio file",
+    )
     search_options.add_argument(
         "--name",
         dest="name_contains",
@@ -238,18 +252,25 @@ def main(
         audio=audio_embedding_factory,
     )
     index_handlers = _index_handlers(embedding_factories)
+    file_query_vectorizers = _file_query_vectorizers()
     handlers_by_type = {
         handler.file_type: handler for handler in index_handlers
     }
     search_target: str | None = None
     semantic_query = (args.query or "").strip()
+    query_file: Path | None = args.query_file
+    search_source: SearchSource | None = None
     interactive_terminal = _is_interactive_terminal()
     interactive_mode = args.interactive or (
         not raw_argv and interactive_terminal
     )
 
     if interactive_mode:
-        if args.query is not None or args.index_directory is not None:
+        if (
+            args.query is not None
+            or query_file is not None
+            or args.index_directory is not None
+        ):
             display.print_error(
                 "Interactive search cannot be combined with a query or --index"
             )
@@ -301,6 +322,7 @@ def main(
             value is not None
             for value in (
                 args.name_contains,
+                args.query_file,
                 args.target,
                 args.file_format,
                 args.min_resolution,
@@ -339,9 +361,14 @@ def main(
         ):
             display.print_error("Index options require --index")
             return 2
-        if not semantic_query:
+        if args.query is not None and query_file is not None:
             display.print_error(
-                "Search query is required unless --index is used"
+                "A text query cannot be combined with --query-file"
+            )
+            return 2
+        if not semantic_query and query_file is None:
+            display.print_error(
+                "A text query or --query-file is required unless --index is used"
             )
             return 2
         result_limit = (
@@ -355,8 +382,24 @@ def main(
             search_target = _resolve_search_target(
                 args.target,
                 args.file_format,
+                query_file,
             )
             _validate_target_filters(args, search_target)
+            if query_file is not None:
+                vectorizer = file_query_vectorizers.get(search_target)
+                if vectorizer is None:
+                    raise ValueError(
+                        "File similarity search is not enabled for "
+                        f"{search_target}"
+                    )
+                search_source = SearchSource.from_file(
+                    validate_query_file(
+                        query_file,
+                        vectorizer.supported_extensions,
+                    )
+                )
+            else:
+                search_source = SearchSource.from_text(semantic_query)
         except ValueError as error:
             display.print_error(f"Invalid search: {error}")
             return 2
@@ -391,18 +434,21 @@ def main(
                 return runner(
                     file_index,
                     handlers_by_type,
+                    file_query_vectorizers,
                     allowed_targets,
                     result_limit,
                 )
             assert metadata_query is not None
             assert search_target is not None
+            assert search_source is not None
             return _search(
                 file_index,
-                semantic_query,
+                search_source,
                 metadata_query,
                 result_limit,
                 handlers_by_type[search_target],
                 display,
+                file_vectorizer=file_query_vectorizers.get(search_target),
             )
     except (EOFError, KeyboardInterrupt):
         display.print_error()
@@ -429,6 +475,7 @@ def _embedding_factories(
 def _resolve_search_target(
     explicit_target: str | None,
     file_format: str | None,
+    query_file: Path | None = None,
 ) -> str:
     inferred_target = _target_for_format(file_format) if file_format else None
     if (
@@ -440,9 +487,30 @@ def _resolve_search_target(
             f"Format {file_format!r} is {inferred_target}, not {explicit_target}"
         )
     if explicit_target is not None:
-        return explicit_target
-    if inferred_target is not None:
-        return inferred_target
+        selected_target = explicit_target
+    elif inferred_target is not None:
+        selected_target = inferred_target
+    else:
+        selected_target = None
+
+    query_target = (
+        _target_for_format(query_file.suffix) if query_file is not None else None
+    )
+    if query_file is not None and query_target is None:
+        extension = query_file.suffix or "<none>"
+        raise ValueError(f"Unsupported query file extension: {extension}")
+    if (
+        selected_target is not None
+        and query_target is not None
+        and selected_target != query_target
+    ):
+        raise ValueError(
+            f"Query file is {query_target}, not {selected_target}"
+        )
+    if selected_target is not None:
+        return selected_target
+    if query_target is not None:
+        return query_target
     raise ValueError(
         "Search file type is required; use --target image or --target audio"
     )
@@ -495,6 +563,7 @@ def _can_prompt() -> bool:
 def _run_interactive_search(
     file_index: FileIndexRepository,
     handlers: Mapping[str, IndexHandler],
+    file_query_vectorizers: Mapping[str, FileQueryVectorizer],
     allowed_targets: Sequence[str],
     limit: int,
 ) -> int:
@@ -503,6 +572,7 @@ def _run_interactive_search(
     return run_interactive_search(
         file_index,
         handlers,
+        file_query_vectorizers,
         allowed_targets,
         limit,
     )
@@ -527,6 +597,11 @@ def _index_handlers(
             vector_scope="segment",
         ),
     )
+
+
+def _file_query_vectorizers() -> dict[str, FileQueryVectorizer]:
+    """Return file-query adapters enabled for each search target."""
+    return {"image": ImageFileQueryVectorizer()}
 
 
 def _image_processor_for(
@@ -754,11 +829,13 @@ def _metadata_query(args: argparse.Namespace) -> FileMetadataQuery:
 
 def _search(
     file_index: FileIndexRepository,
-    semantic_query: str,
+    source: SearchSource,
     metadata_query: FileMetadataQuery,
     limit: int,
     handler: IndexHandler,
     display: CliDisplay,
+    *,
+    file_vectorizer: FileQueryVectorizer | None = None,
 ) -> int:
     total_started = perf_counter()
 
@@ -768,22 +845,20 @@ def _search(
     initialization_ms = (perf_counter() - initialization_started) * 1000
 
     try:
-        if not isinstance(embedding, TextEmbedding):
-            raise TypeError(
-                f"{handler.file_type.title()} search requires a text embedding"
-            )
         embedding_started = perf_counter()
-        query_vector = embedding.predict_text(semantic_query)
+        query_vectors = embed_search_source(
+            source,
+            embedding,
+            file_vectorizer=file_vectorizer,
+        )
         embedding_ms = (perf_counter() - embedding_started) * 1000
 
         fetch_started = perf_counter()
-        search = {
-            "file": file_index.semantic_search,
-            "segment": file_index.semantic_segment_search,
-        }[handler.vector_scope]
-        results = search(
-            query_vector,
+        results = search_vectors(
+            file_index,
+            query_vectors,
             vector_name=embedding.vector_name,
+            vector_scope=handler.vector_scope,
             limit=limit,
             metadata_filter=file_metadata_filter(metadata_query),
         )
@@ -794,7 +869,8 @@ def _search(
 
     display.print_search_results(
         results,
-        query=semantic_query,
+        query=source.display_value,
+        query_is_file=source.is_file,
         limit=limit,
         timings=(
             ("model", _format_duration(initialization_ms)),

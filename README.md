@@ -12,9 +12,9 @@ and retrieval under the user's control.
 - Combine semantic search with metadata filters.
 - Store indexes locally or in a configured Qdrant service.
 
-The current implementation supports image and audio indexing, text-to-image
-and text-to-audio search through the CLI and TUI, raw audio chunk results in
-the CLI, and grouped expandable audio results in the TUI.
+The current implementation supports image and audio indexing, text-to-image,
+image-to-image, and text-to-audio search through the CLI and TUI, raw audio
+chunk results in the CLI, and grouped expandable audio results in the TUI.
 
 ## Setup
 
@@ -95,6 +95,10 @@ is submitted, retains it for later searches, and releases it before switching
 to the other target. Supplying `--target image` or `--target audio` when the
 TUI is launched constrains the selector to that target.
 
+For image searches, select File beside the target and enter a reference image
+path to find visually similar indexed images. Optional result filters have a
+separate field in File mode. Audio currently offers Text mode only.
+
 Interactive queries may combine semantic text with the metadata currently
 stored in the index. Image queries support:
 
@@ -120,6 +124,20 @@ in the TUI, and each file can be expanded to show its matching chunks ordered
 by similarity.
 
 The existing one-shot interface remains available.
+
+Find images similar to a reference file. The image target is inferred from the
+query file extension:
+
+```sh
+uv run python -m filelore --query-file /path/to/reference.jpg
+```
+
+Metadata flags still filter the indexed results rather than the query file:
+
+```sh
+uv run python -m filelore --query-file /path/to/reference.png \
+  --format jpeg --min-resolution 1920x1080
+```
 
 Search the index with a natural-language description:
 

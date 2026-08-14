@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from threading import RLock
 from time import perf_counter
 from typing import Any, Callable, Mapping, Sequence
@@ -17,17 +18,25 @@ from textual.widgets import Collapsible, Footer, Header, Input, Select, Static
 from textual.worker import get_current_worker
 
 from filelore.cli_display import search_result_item_renderable
-from filelore.embedding import TextEmbedding
+from filelore.embedding import BaseEmbedding
 from filelore.index import (
     FileIndexRepository,
+    FileMetadataQuery,
     FileSearchResult,
     IndexHandler,
     file_metadata_filter,
 )
 from filelore.search_query import (
-    ParsedSearchQuery,
     parse_search_query,
-    validate_search_target,
+    parse_search_filters,
+    validate_search_metadata,
+)
+from filelore.search import (
+    FileQueryVectorizer,
+    SearchSource,
+    embed_search_source,
+    search_vectors,
+    validate_query_file,
 )
 
 
@@ -45,7 +54,8 @@ class SearchResultEntity:
 
 @dataclass(frozen=True, slots=True)
 class SearchResponse:
-    parsed_query: ParsedSearchQuery
+    source: SearchSource
+    filters: tuple[tuple[str, str], ...]
     target: str
     results: tuple[SearchResultEntity, ...]
     limit: int
@@ -64,6 +74,8 @@ class SearchSession:
         file_index: FileIndexRepository,
         handlers: Mapping[str, IndexHandler],
         allowed_targets: Sequence[str],
+        *,
+        file_query_vectorizers: Mapping[str, FileQueryVectorizer] | None = None,
     ) -> None:
         selected_targets = tuple(dict.fromkeys(allowed_targets))
         if not selected_targets:
@@ -75,12 +87,17 @@ class SearchSession:
         self.handlers = {
             target: handlers[target] for target in selected_targets
         }
+        self.file_query_vectorizers = {
+            target: vectorizer
+            for target, vectorizer in (file_query_vectorizers or {}).items()
+            if target in self.handlers
+        }
         self.targets = selected_targets
         self.default_target = (
             "image" if "image" in self.handlers else selected_targets[0]
         )
         self._active_target: str | None = None
-        self._embedding: TextEmbedding[Any] | None = None
+        self._embedding: BaseEmbedding[Any] | None = None
         self._lock = RLock()
 
     @property
@@ -89,17 +106,29 @@ class SearchSession:
 
     def search(
         self,
-        parsed_query: ParsedSearchQuery,
+        source: SearchSource,
+        metadata_query: FileMetadataQuery,
         target: str,
         limit: int,
         *,
+        filters: tuple[tuple[str, str], ...] = (),
         on_stage: StageCallback | None = None,
     ) -> SearchResponse:
         if target not in self.handlers:
             raise ValueError(f"Interactive target is not enabled: {target}")
         if limit < 1:
             raise ValueError("Search limit must be positive")
-        validate_search_target(parsed_query, target)
+        validate_search_metadata(metadata_query, target)
+        file_vectorizer = self.file_query_vectorizers.get(target)
+        if source.file is not None:
+            if file_vectorizer is None:
+                raise ValueError(
+                    f"File similarity search is not enabled for {target}"
+                )
+            validate_query_file(
+                source.file,
+                file_vectorizer.supported_extensions,
+            )
 
         with self._lock:
             total_started = perf_counter()
@@ -107,28 +136,28 @@ class SearchSession:
             if on_stage is not None:
                 on_stage(f"Searching {target} files…")
             embedding_started = perf_counter()
-            query_vector = embedding.predict_text(
-                parsed_query.semantic_query
+            query_vectors = embed_search_source(
+                source,
+                embedding,
+                file_vectorizer=file_vectorizer,
             )
             embedding_ms = (perf_counter() - embedding_started) * 1000
 
             fetch_started = perf_counter()
             handler = self.handlers[target]
-            search = {
-                "file": self.file_index.semantic_search,
-                "segment": self.file_index.semantic_segment_search,
-            }[handler.vector_scope]
             fetch_limit = (
                 limit * AUDIO_OVERFETCH_FACTOR
                 if handler.vector_scope == "segment"
                 else limit
             )
-            raw_results = search(
-                query_vector,
+            raw_results = search_vectors(
+                self.file_index,
+                query_vectors,
                 vector_name=embedding.vector_name,
+                vector_scope=handler.vector_scope,
                 limit=fetch_limit,
                 metadata_filter=file_metadata_filter(
-                    parsed_query.metadata_query
+                    metadata_query
                 ),
             )
             fetch_ms = (perf_counter() - fetch_started) * 1000
@@ -141,7 +170,8 @@ class SearchSession:
                 )
             grouped_results = tuple(item for item in results if item.chunks)
             return SearchResponse(
-                parsed_query=parsed_query,
+                source=source,
+                filters=filters,
                 target=target,
                 results=results,
                 limit=limit,
@@ -167,7 +197,7 @@ class SearchSession:
         target: str,
         *,
         on_stage: StageCallback | None,
-    ) -> TextEmbedding[Any]:
+    ) -> BaseEmbedding[Any]:
         if self._embedding is not None and self._active_target == target:
             return self._embedding
         if self._embedding is not None:
@@ -177,11 +207,6 @@ class SearchSession:
         if on_stage is not None:
             on_stage(f"Loading {target} model…")
         embedding = self.handlers[target].embedding_factory()
-        if not isinstance(embedding, TextEmbedding):
-            embedding.close()
-            raise TypeError(
-                f"Interactive {target} search requires a text embedding"
-            )
         self._embedding = embedding
         self._active_target = target
         return embedding
@@ -332,6 +357,12 @@ class FileLoreSearchApp(App[None]):
         margin-right: 1;
     }
 
+    #query-mode {
+        width: 12;
+        height: 3;
+        margin-right: 1;
+    }
+
     #query {
         width: 1fr;
         height: 3;
@@ -359,6 +390,15 @@ class FileLoreSearchApp(App[None]):
 
     #active-filters {
         color: $accent;
+    }
+
+    #file-filters {
+        height: 3;
+        margin-bottom: 1;
+    }
+
+    .hidden {
+        display: none;
     }
 
     #status {
@@ -412,6 +452,8 @@ class FileLoreSearchApp(App[None]):
         self.session = session
         self.initial_limit = limit
         self._searching = False
+        self._query_mode = "text"
+        self._query_values = {"text": "", "file": ""}
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -422,6 +464,12 @@ class FileLoreSearchApp(App[None]):
                     value=self.session.default_target,
                     allow_blank=False,
                     id="target",
+                )
+                yield Select[str](
+                    self._query_mode_options(self.session.default_target),
+                    value="text",
+                    allow_blank=False,
+                    id="query-mode",
                 )
                 yield Input(
                     placeholder="Describe a file…",
@@ -434,6 +482,11 @@ class FileLoreSearchApp(App[None]):
                     allow_blank=False,
                     id="limit",
                 )
+            yield Input(
+                placeholder="Optional result filters, such as format:png",
+                id="file-filters",
+                classes="hidden",
+            )
             yield Static("", id="active-filters")
             yield Static("", id="status")
             with VerticalScroll(id="results-scroll"):
@@ -444,23 +497,49 @@ class FileLoreSearchApp(App[None]):
     def on_mount(self) -> None:
         target_select = self.query_one("#target", Select)
         target_select.disabled = len(self.session.targets) == 1
-        self._update_query_placeholder(self.session.default_target)
+        self._update_query_placeholder(
+            self.session.default_target,
+            self._query_mode,
+        )
         self.query_one("#query", Input).focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if self._searching:
             return
         try:
-            parsed_query = parse_search_query(event.value)
             target = self._selected_target()
-            validate_search_target(parsed_query, target)
+            query_value = self.query_one("#query", Input).value
+            if self._query_mode == "file":
+                vectorizer = self.session.file_query_vectorizers.get(target)
+                if vectorizer is None:
+                    raise ValueError(
+                        f"File similarity search is not enabled for {target}"
+                    )
+                prepared_path = validate_query_file(
+                    Path(query_value),
+                    vectorizer.supported_extensions,
+                )
+                source = SearchSource.from_file(prepared_path)
+                parsed_filters = parse_search_filters(
+                    self.query_one("#file-filters", Input).value
+                )
+                metadata_query = parsed_filters.metadata_query
+                filters = parsed_filters.filters
+            else:
+                parsed_query = parse_search_query(query_value)
+                source = SearchSource.from_text(parsed_query.semantic_query)
+                metadata_query = parsed_query.metadata_query
+                filters = parsed_query.filters
+            validate_search_metadata(metadata_query, target)
         except ValueError as error:
             self._show_error(str(error))
             return
 
-        self._show_filters(parsed_query)
+        self._show_filters(filters)
         self._searching = True
-        event.input.disabled = True
+        self.query_one("#query", Input).disabled = True
+        self.query_one("#file-filters", Input).disabled = True
+        self.query_one("#query-mode", Select).disabled = True
         limit_select = self.query_one("#limit", Select)
         limit_select.disabled = True
         self.query_one("#target", Select).disabled = True
@@ -468,12 +547,20 @@ class FileLoreSearchApp(App[None]):
         if not isinstance(selected_limit, int):
             selected_limit = self.initial_limit
         self._set_status("Searching…", "searching")
-        self.execute_search(parsed_query, target, selected_limit)
+        self.execute_search(
+            source,
+            metadata_query,
+            filters,
+            target,
+            selected_limit,
+        )
 
     @work(exclusive=True, thread=True, group="search", exit_on_error=False)
     def execute_search(
         self,
-        parsed_query: ParsedSearchQuery,
+        source: SearchSource,
+        metadata_query: FileMetadataQuery,
+        filters: tuple[tuple[str, str], ...],
         target: str,
         limit: int,
     ) -> None:
@@ -489,9 +576,11 @@ class FileLoreSearchApp(App[None]):
 
         try:
             response = self.session.search(
-                parsed_query,
+                source,
+                metadata_query,
                 target,
                 limit,
+                filters=filters,
                 on_stage=update_stage,
             )
         except Exception as error:
@@ -538,11 +627,11 @@ class FileLoreSearchApp(App[None]):
         self._set_status(status)
         self._finish_search()
 
-    def _show_filters(self, parsed_query: ParsedSearchQuery) -> None:
+    def _show_filters(self, active: Sequence[tuple[str, str]]) -> None:
         filters = self.query_one("#active-filters", Static)
-        if parsed_query.filters:
+        if active:
             values = "  •  ".join(
-                f"{key}:{value}" for key, value in parsed_query.filters
+                f"{key}:{value}" for key, value in active
             )
             filters.update(f"Active filters  {values}")
         else:
@@ -559,6 +648,8 @@ class FileLoreSearchApp(App[None]):
         self._searching = False
         query = self.query_one("#query", Input)
         query.disabled = False
+        self.query_one("#file-filters", Input).disabled = False
+        self.query_one("#query-mode", Select).disabled = False
         self.query_one("#limit", Select).disabled = False
         self.query_one("#target", Select).disabled = (
             len(self.session.targets) == 1
@@ -573,6 +664,8 @@ class FileLoreSearchApp(App[None]):
     async def action_clear_search(self) -> None:
         query = self.query_one("#query", Input)
         query.value = ""
+        self._query_values = {"text": "", "file": ""}
+        self.query_one("#file-filters", Input).value = ""
         self.query_one("#active-filters", Static).update("")
         results = self.query_one("#results", Vertical)
         await results.remove_children()
@@ -588,7 +681,17 @@ class FileLoreSearchApp(App[None]):
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "target" and isinstance(event.value, str):
-            self._update_query_placeholder(event.value)
+            mode_select = self.query_one("#query-mode", Select)
+            mode_select.set_options(self._query_mode_options(event.value))
+            if (
+                self._query_mode == "file"
+                and event.value not in self.session.file_query_vectorizers
+            ):
+                mode_select.value = "text"
+                self._switch_query_mode("text")
+            self._update_query_placeholder(event.value, self._query_mode)
+        elif event.select.id == "query-mode" and isinstance(event.value, str):
+            self._switch_query_mode(event.value)
 
     def _limit_options(self) -> tuple[tuple[str, int], ...]:
         limits = sorted({*self.LIMIT_PRESETS, self.initial_limit})
@@ -601,6 +704,12 @@ class FileLoreSearchApp(App[None]):
             for target in self.session.targets
         )
 
+    def _query_mode_options(self, target: str) -> tuple[tuple[str, str], ...]:
+        options = [("Text", "text")]
+        if target in self.session.file_query_vectorizers:
+            options.append(("File", "file"))
+        return tuple(options)
+
     def _selected_target(self) -> str:
         selected = self.query_one("#target", Select).value
         return (
@@ -609,9 +718,29 @@ class FileLoreSearchApp(App[None]):
             else self.session.default_target
         )
 
-    def _update_query_placeholder(self, target: str) -> None:
+    def _switch_query_mode(self, mode: str) -> None:
+        if mode == self._query_mode:
+            return
+        query = self.query_one("#query", Input)
+        self._query_values[self._query_mode] = query.value
+        self._query_mode = mode
+        query.value = self._query_values[mode]
+        file_filters = self.query_one("#file-filters", Input)
+        if mode == "file":
+            file_filters.remove_class("hidden")
+        else:
+            file_filters.add_class("hidden")
+        self._update_query_placeholder(self._selected_target(), mode)
+        query.focus()
+
+    def _update_query_placeholder(self, target: str, mode: str) -> None:
         label = "image" if target == "image" else "audio"
-        self.query_one("#query", Input).placeholder = f"Describe {label}…"
+        placeholder = (
+            f"Path to reference {label}…"
+            if mode == "file"
+            else f"Describe {label}…"
+        )
+        self.query_one("#query", Input).placeholder = placeholder
 
     def on_unmount(self) -> None:
         self.session.close()
@@ -620,11 +749,17 @@ class FileLoreSearchApp(App[None]):
 def run_interactive_search(
     file_index: FileIndexRepository,
     handlers: Mapping[str, IndexHandler],
+    file_query_vectorizers: Mapping[str, FileQueryVectorizer],
     allowed_targets: Sequence[str],
     limit: int,
 ) -> int:
     """Run the full-screen search app until the user exits."""
-    session = SearchSession(file_index, handlers, allowed_targets)
+    session = SearchSession(
+        file_index,
+        handlers,
+        allowed_targets,
+        file_query_vectorizers=file_query_vectorizers,
+    )
     try:
         FileLoreSearchApp(session, limit=limit).run()
     finally:
@@ -656,7 +791,9 @@ def _query_help_text(target: str) -> str:
             "\nImage filters\n"
             "min-res:1280x720   Minimum image resolution\n"
             "max-res:3840x2160  Maximum image resolution\n\n"
-            "Example: cat on a balcony format:jpg after:2025"
+            "Text example: cat on a balcony format:jpg after:2025\n"
+            "File mode: enter a reference image path, then put optional "
+            "filters in the separate filter field."
         )
     dates = (
         "\n\nDates accept YYYY, YYYY-MM, YYYY-MM-DD, or an ISO datetime."

@@ -5,7 +5,11 @@ from datetime import datetime
 import pytest
 
 from filelore.index import FileMetadataQuery, file_metadata_filter
-from filelore.search_query import parse_search_query, validate_search_target
+from filelore.search_query import (
+    parse_search_filters,
+    parse_search_query,
+    validate_search_target,
+)
 from filelore.storage import ConditionOperator
 
 
@@ -36,6 +40,23 @@ def test_interactive_query_parses_semantic_text_and_current_metadata_filters() -
         ("after", "2025"),
         ("before", "2026"),
     )
+
+
+def test_file_query_parses_filter_only_input() -> None:
+    parsed = parse_search_filters('name:"summer trip" format:png after:2025')
+
+    assert parsed.filters == (
+        ("name", "summer trip"),
+        ("format", "png"),
+        ("after", "2025"),
+    )
+    assert parsed.metadata_query.name_contains == "summer trip"
+    assert parsed.metadata_query.file_format == "png"
+
+
+def test_file_query_filters_reject_unqualified_text() -> None:
+    with pytest.raises(ValueError, match="key:value"):
+        parse_search_filters("similar image format:png")
 
 
 @pytest.mark.parametrize(

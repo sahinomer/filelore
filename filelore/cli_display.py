@@ -196,6 +196,7 @@ class CliDisplay:
         results: Sequence[FileSearchResult],
         *,
         query: str,
+        query_is_file: bool = False,
         limit: int,
         timings: Sequence[tuple[str, str]],
     ) -> None:
@@ -204,6 +205,7 @@ class CliDisplay:
             search_results_renderable(
                 results,
                 query=query,
+                query_is_file=query_is_file,
                 limit=limit,
                 timings=timings,
             )
@@ -214,13 +216,17 @@ def search_results_renderable(
     results: Sequence[FileSearchResult],
     *,
     query: str,
+    query_is_file: bool = False,
     limit: int,
     timings: Sequence[tuple[str, str]],
     show_footer: bool = True,
 ) -> Group:
     """Build a Rich result group shared by CLI and full-screen search."""
     renderables: list[RenderableType] = []
-    title = Text("Search results for ", style="bold")
+    title = Text(
+        "Files similar to " if query_is_file else "Search results for ",
+        style="bold",
+    )
     title.append(f'"{query}"', style="bold cyan")
     renderables.append(Rule(title, style="cyan"))
 

@@ -8,9 +8,11 @@ from filelore.search.core import (
     search_vectors,
     validate_query_file,
 )
+from filelore.search.image import ImageFileQueryVectorizer
 
 __all__ = [
     "FileQueryVectorizer",
+    "ImageFileQueryVectorizer",
     "SearchRepository",
     "SearchSource",
     "embed_search_source",
