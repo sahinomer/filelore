@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import filelore.cli as cli_module
 import filelore.index.pipeline as pipeline_module
-from filelore.audio import SoundFileAudioDecoder
+from filelore.audio import AudioChunkVectorizer, SoundFileAudioDecoder
 from filelore.embedding import BaseEmbedding
 from filelore.embedding.audio import ClapAudioEmbedding
 from filelore.embedding.image import ClipImageEmbedding
@@ -32,7 +32,7 @@ PIPELINE_TARGETS: tuple[tuple[object, str], ...] = (
     (AudioMetadataParser, "parse"),
     (ImageProcessor, "process_batch"),
     (AudioProcessor, "process_batch"),
-    (AudioProcessor, "_plan_segments"),
+    (AudioChunkVectorizer, "_plan_segments"),
     (SoundFileAudioDecoder, "decode"),
     (FileIndexRepository, "store_prepared_many"),
     (QdrantVectorDatabase, "ensure_collection"),
@@ -170,17 +170,20 @@ class ExternalInstrumentation:
         self._patch_processing(ImageProcessor, "image")
         self._patch_processing(AudioProcessor, "audio")
 
-        original_plan = AudioProcessor._plan_segments
+        original_plan = AudioChunkVectorizer._plan_segments
 
         @wraps(original_plan)
-        def plan_segments(instance: Any, parsed: Sequence[Any], failures: Any) -> Any:
-            with recorder.span("audio.segment_planning", items=len(parsed)) as measured:
-                result = original_plan(instance, parsed, failures)
+        def plan_segments(instance: Any, sources: Sequence[Any]) -> Any:
+            with recorder.span(
+                "audio.segment_planning",
+                items=len(sources),
+            ) as measured:
+                result = original_plan(instance, sources)
                 measured.details["segments"] = len(result[0])
                 return result
 
         self._stack.enter_context(
-            patch.object(AudioProcessor, "_plan_segments", plan_segments)
+            patch.object(AudioChunkVectorizer, "_plan_segments", plan_segments)
         )
 
         original_decode = SoundFileAudioDecoder.decode

@@ -7,7 +7,9 @@ from typing import Sequence
 import pytest
 
 from filelore.audio import (
+    AudioChunkVectorizer,
     AudioRange,
+    AudioVectorizationSource,
     SlidingWindowChunker,
     SoundFileAudioDecoder,
     WholeFileSegmenter,
@@ -149,6 +151,45 @@ def test_soundfile_decoder_reads_range_downmixes_and_resamples(
     assert getattr(decoded.samples, "ndim") == 1
     assert getattr(decoded.samples, "dtype").name == "float32"
     assert len(decoded.samples) == 8_000
+
+
+def test_shared_audio_vectorizer_returns_timed_model_chunks(
+    tmp_path: Path,
+) -> None:
+    audio_path = tmp_path / "shared.wav"
+    create_wave(audio_path, duration_seconds=12.0)
+    metadata = AudioMetadataParser().parse(audio_path)
+    embedding = RecordingAudioEmbedding()
+    decoder = RecordingAudioDecoder()
+
+    batch = AudioChunkVectorizer(
+        embedding,
+        decoder=decoder,
+    ).vectorize(
+        (
+            AudioVectorizationSource(
+                source_path=audio_path,
+                metadata=metadata,
+            ),
+        )
+    )
+
+    assert batch.failures == ()
+    assert len(batch.files) == 1
+    assert [
+        (
+            segment.index,
+            segment.audio_range.start_seconds,
+            segment.audio_range.end_seconds,
+            segment.vector,
+        )
+        for segment in batch.files[0].segments
+    ] == [
+        (0, 0.0, 10.0, (1.0, 0.0, 0.0)),
+        (1, 5.0, 12.0, (6.0, 0.0, 0.0)),
+    ]
+    assert [len(items) for items in embedding.batches] == [2]
+    assert all(call[2] == embedding.sampling_rate for call in decoder.calls)
 
 
 def test_audio_processor_chunks_batches_and_regroups_segments(

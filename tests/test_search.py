@@ -7,6 +7,7 @@ from typing import Any, Sequence
 
 import pytest
 
+from filelore.audio import AudioRange
 from filelore.embedding import (
     AudioEmbedding,
     AudioInput,
@@ -15,6 +16,7 @@ from filelore.embedding import (
     TextEmbedding,
 )
 from filelore.index import FileIndexEntry, FileSearchResult, FileSegmentMatch
+from filelore.processors import AudioProcessor
 from filelore.search import (
     AudioFileQueryVectorizer,
     SearchSource,
@@ -68,12 +70,14 @@ class RecordingAudioEmbedding(AudioEmbedding):
             dimensions=2,
         )
         self.audio_inputs: list[AudioInput] = []
+        self.batches: list[tuple[AudioInput, ...]] = []
 
     def predict_batch(
         self,
         items: Sequence[AudioInput],
     ) -> tuple[EmbeddingVector, ...]:
         self.audio_inputs.extend(items)
+        self.batches.append(tuple(items))
         return tuple((1.0, 0.0) for _ in items)
 
     def predict_text_batch(
@@ -81,6 +85,24 @@ class RecordingAudioEmbedding(AudioEmbedding):
         texts: Sequence[str],
     ) -> tuple[EmbeddingVector, ...]:
         return tuple((0.0, 1.0) for _ in texts)
+
+
+class RecordingAudioRangeDecoder:
+    def __init__(self) -> None:
+        self.calls: list[tuple[Path, AudioRange, int]] = []
+
+    def decode(
+        self,
+        path: str | Path,
+        audio_range: AudioRange,
+        *,
+        target_sampling_rate: int,
+    ) -> AudioInput:
+        self.calls.append((Path(path), audio_range, target_sampling_rate))
+        return AudioInput(
+            samples=(audio_range.start_seconds, audio_range.end_seconds),
+            sampling_rate=target_sampling_rate,
+        )
 
 
 class RecordingRepository:
@@ -150,7 +172,7 @@ def test_embed_search_source_supports_text_and_file_vectors() -> None:
     assert vectorizer.paths == [Path("query.example")]
 
 
-def test_audio_file_query_uses_index_equivalent_overlapping_chunks(
+def test_audio_file_query_matches_index_chunk_preparation(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "query.wav"
@@ -161,15 +183,32 @@ def test_audio_file_query_uses_index_equivalent_overlapping_chunks(
         output.setsampwidth(2)
         output.setframerate(sample_rate)
         output.writeframes(b"\x00\x00" * frame_count)
-    embedding = RecordingAudioEmbedding()
+    index_embedding = RecordingAudioEmbedding()
+    index_decoder = RecordingAudioRangeDecoder()
+    indexed = AudioProcessor(
+        embedding=index_embedding,
+        decoder=index_decoder,
+    ).process_batch((path,))
+    query_embedding = RecordingAudioEmbedding()
+    query_decoder = RecordingAudioRangeDecoder()
 
-    vectors = AudioFileQueryVectorizer().predict_file(path, embedding)
+    vectors = AudioFileQueryVectorizer(decoder=query_decoder).predict_file(
+        path,
+        query_embedding,
+    )
 
-    assert vectors == ((1.0, 0.0),) * 4
-    assert len(embedding.audio_inputs) == 4
+    indexed_vectors = tuple(
+        segment.vectors[index_embedding.vector_name]
+        for segment in indexed.files[0].segments
+    )
+    assert vectors == indexed_vectors == ((1.0, 0.0),) * 4
+    assert index_decoder.calls == query_decoder.calls
+    assert [len(batch) for batch in index_embedding.batches] == [2, 2]
+    assert [len(batch) for batch in query_embedding.batches] == [2, 2]
+    assert index_embedding.audio_inputs == query_embedding.audio_inputs
     assert all(
-        item.sampling_rate == embedding.sampling_rate
-        for item in embedding.audio_inputs
+        item.sampling_rate == query_embedding.sampling_rate
+        for item in query_embedding.audio_inputs
     )
 
 
