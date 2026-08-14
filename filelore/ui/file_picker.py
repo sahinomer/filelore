@@ -2,13 +2,37 @@
 
 from __future__ import annotations
 
+import os
+import string
 from collections.abc import Collection, Iterable
 from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, DirectoryTree, Static
+from textual.widgets import Button, DirectoryTree, Select, Static
+
+
+def available_filesystem_roots() -> tuple[Path, ...]:
+    """Return mounted drive roots on Windows or the POSIX filesystem root."""
+    if os.name != "nt":
+        return (Path("/"),)
+
+    try:
+        from ctypes import windll
+
+        drive_mask = int(windll.kernel32.GetLogicalDrives())
+    except (AttributeError, OSError):
+        drive_mask = 0
+
+    roots = tuple(
+        Path(f"{letter}:\\")
+        for index, letter in enumerate(string.ascii_uppercase)
+        if drive_mask & (1 << index)
+    )
+    if roots:
+        return roots
+    return (Path(Path.cwd().anchor),)
 
 
 class SupportedFileTree(DirectoryTree):
@@ -62,6 +86,12 @@ class FilePickerScreen(ModalScreen[Path | None]):
         height: 3;
     }
 
+    #file-picker-root {
+        width: 12;
+        height: 3;
+        margin-right: 1;
+    }
+
     #file-picker-directory {
         width: 1fr;
         height: 3;
@@ -93,14 +123,38 @@ class FilePickerScreen(ModalScreen[Path | None]):
         self,
         start_directory: Path,
         supported_extensions: Collection[str],
+        *,
+        roots: Collection[Path] | None = None,
     ) -> None:
         super().__init__()
         self.current_directory = start_directory.resolve()
         self.supported_extensions = frozenset(supported_extensions)
+        discovered_roots = tuple(
+            root.resolve()
+            for root in (
+                available_filesystem_roots() if roots is None else roots
+            )
+        )
+        current_root = Path(self.current_directory.anchor).resolve()
+        if not any(
+            self._is_below(self.current_directory, root)
+            for root in discovered_roots
+        ):
+            discovered_roots += (current_root,)
+        self.roots = tuple(dict.fromkeys(discovered_roots))
 
     def compose(self) -> ComposeResult:
         with Vertical(id="file-picker-dialog"):
             with Horizontal(id="file-picker-toolbar"):
+                yield Select[str](
+                    tuple(
+                        (self._root_label(root), str(root))
+                        for root in self.roots
+                    ),
+                    value=str(self._root_for(self.current_directory)),
+                    allow_blank=False,
+                    id="file-picker-root",
+                )
                 yield Static(
                     str(self.current_directory),
                     id="file-picker-directory",
@@ -113,7 +167,7 @@ class FilePickerScreen(ModalScreen[Path | None]):
                 id="file-picker-tree",
             )
             yield Static(
-                "Select a file with Enter or the mouse · Alt+Up goes back",
+                "Choose a root, then select a file · Alt+Up goes back",
                 id="file-picker-hint",
             )
 
@@ -142,6 +196,13 @@ class FilePickerScreen(ModalScreen[Path | None]):
             event.stop()
             self.action_cancel()
 
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id != "file-picker-root":
+            return
+        event.stop()
+        if isinstance(event.value, str):
+            self._open_directory(Path(event.value))
+
     def action_parent_directory(self) -> None:
         self._open_directory(self.current_directory.parent)
 
@@ -155,3 +216,22 @@ class FilePickerScreen(ModalScreen[Path | None]):
         self.current_directory = prepared
         self.query_one("#file-picker-directory", Static).update(str(prepared))
         self.query_one(SupportedFileTree).path = prepared
+
+    def _root_for(self, path: Path) -> Path:
+        matches = tuple(root for root in self.roots if self._is_below(path, root))
+        return max(matches, key=lambda root: len(root.parts))
+
+    @staticmethod
+    def _is_below(path: Path, root: Path) -> bool:
+        try:
+            path.relative_to(root)
+        except ValueError:
+            return False
+        return True
+
+    @staticmethod
+    def _root_label(root: Path) -> str:
+        filesystem_root = Path(root.anchor)
+        if root == filesystem_root:
+            return root.drive or root.anchor
+        return root.name or str(root)

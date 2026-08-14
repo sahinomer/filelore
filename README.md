@@ -96,14 +96,17 @@ is submitted, retains it for later searches, and releases it before switching
 to the other target. Supplying `--target image` or `--target audio` when the
 TUI is launched constrains the selector to that target.
 
-Enter a reference image or audio path directly in the search field to find
-similar indexed media. Relative paths start from the terminal's working
-directory. Filesystem suggestions appear as you type; press Tab or Right to
-accept a completion, or use Browse / Ctrl+O to select a supported file with the
-keyboard or mouse. Suggestions and the browser only show formats supported by
-the selected target. A manually entered file path can still select the matching
-target automatically. The detected file appears as a removable attachment,
-while optional result filters remain in the same query field:
+Find media similar to a reference image or audio file using any of these
+methods:
+
+- Type or paste a file path. Relative paths start from the terminal's working
+  directory.
+- Start typing a path, then press Tab or Right to accept a suggestion.
+- Select Browse or press Ctrl+O to choose a file with the keyboard or mouse.
+
+Autocomplete and Browse follow the selected Image or Audio target. Once chosen,
+the reference appears as an attachment and the same field accepts optional
+result filters:
 
 ```text
 samples/rain.wav format:wav longer-than:1 shorter-than:30

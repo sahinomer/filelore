@@ -402,6 +402,44 @@ async def test_tui_file_picker_filters_files_for_selected_target(
 
 
 @pytest.mark.anyio
+async def test_file_picker_can_switch_between_filesystem_roots(
+    tmp_path: Path,
+) -> None:
+    first_root = tmp_path / "first-root"
+    second_root = tmp_path / "second-root"
+    first_root.mkdir()
+    second_root.mkdir()
+    repository = RecordingSearchRepository()
+    created: list[RecordingImageEmbedding] = []
+    app = FileLoreSearchApp(
+        image_session(repository, created),
+        limit=20,
+        working_directory=first_root,
+    )
+
+    async with app.run_test(size=(100, 32)) as pilot:
+        picker = FilePickerScreen(
+            first_root,
+            {".png"},
+            roots=(first_root, second_root),
+        )
+        await app.push_screen(picker)
+        await pilot.pause()
+
+        root_select = picker.query_one("#file-picker-root", Select)
+        assert root_select.value == str(first_root.resolve())
+
+        root_select.value = str(second_root.resolve())
+        await pilot.pause()
+
+        assert picker.current_directory == second_root.resolve()
+        assert picker.query_one(SupportedFileTree).path == second_root.resolve()
+
+        picker.dismiss(None)
+        await pilot.pause()
+
+
+@pytest.mark.anyio
 async def test_tui_path_suggestions_follow_selected_target(
     tmp_path: Path,
 ) -> None:
@@ -429,9 +467,13 @@ async def test_tui_path_suggestions_follow_selected_target(
         query_bar = app.query_one(QueryBar)
         query_bar.value = "ref"
         await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
         assert query_bar.input._suggestion == "reference.png"
 
         app.query_one("#target", Select).value = "audio"
+        await pilot.pause()
+        await app.workers.wait_for_complete()
         await pilot.pause()
 
         assert query_bar.input._suggestion == "reference.wav"

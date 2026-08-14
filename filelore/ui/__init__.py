@@ -1,6 +1,10 @@
 """Reusable Textual interface components."""
 
-from filelore.ui.file_picker import FilePickerScreen, SupportedFileTree
+from filelore.ui.file_picker import (
+    FilePickerScreen,
+    SupportedFileTree,
+    available_filesystem_roots,
+)
 from filelore.ui.path_suggester import FileSystemPathSuggester
 from filelore.ui.query_bar import (
     QueryBar,
@@ -16,5 +20,6 @@ __all__ = [
     "QueryInput",
     "SupportedFileTree",
     "TailPathLabel",
+    "available_filesystem_roots",
     "shorten_path_from_start",
 ]
