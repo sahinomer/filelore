@@ -669,6 +669,82 @@ async def test_tui_validation_errors_do_not_load_a_model(
 
 
 @pytest.mark.anyio
+async def test_tui_recovers_controls_after_background_search_failure(
+    tmp_path: Path,
+) -> None:
+    repository = RecordingSearchRepository(
+        file_results=(image_result(tmp_path / "cat.png"),)
+    )
+    original_search = repository.semantic_search
+    attempts = 0
+
+    def fail_once(
+        vector: Sequence[float],
+        **kwargs: Any,
+    ) -> tuple[FileSearchResult, ...]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("database unavailable")
+        return original_search(vector, **kwargs)
+
+    repository.semantic_search = fail_once  # type: ignore[method-assign]
+    created: list[RecordingImageEmbedding] = []
+    app = FileLoreSearchApp(image_session(repository, created), limit=10)
+
+    async with app.run_test(size=(100, 32)) as pilot:
+        query = app.query_one("#query", Input)
+        query.value = "cat"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        status = app.query_one("#status", Static)
+        assert "Search failed: database unavailable" in str(status.content)
+        assert status.has_class("error")
+        assert not query.disabled
+        assert not app.query_one("#file-filters", Input).disabled
+        assert not app.query_one("#query-mode", Select).disabled
+        assert not app.query_one("#limit", Select).disabled
+        assert app.query_one("#target", Select).disabled
+        assert query.has_focus
+
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert attempts == 2
+        assert "Found 1 file" in str(status.content)
+        assert not status.has_class("error")
+        assert len(app.query(SearchResultCard)) == 1
+
+
+@pytest.mark.anyio
+async def test_tui_renders_empty_search_results_and_restores_controls() -> None:
+    repository = RecordingSearchRepository()
+    created: list[RecordingImageEmbedding] = []
+    app = FileLoreSearchApp(image_session(repository, created), limit=10)
+
+    async with app.run_test(size=(100, 32)) as pilot:
+        query = app.query_one("#query", Input)
+        query.value = "missing subject"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        results = app.query_one("#results", Vertical)
+        assert "No semantic matches found." in str(
+            results.query_one(Static).content
+        )
+        assert len(app.query(SearchResultCard)) == 0
+        assert "Found 0 files" in str(
+            app.query_one("#status", Static).content
+        )
+        assert not query.disabled
+        assert query.has_focus
+
+
+@pytest.mark.anyio
 async def test_clear_search_restores_empty_results_message(
     tmp_path: Path,
 ) -> None:
