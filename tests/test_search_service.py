@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Literal, Sequence
 
 import pytest
 
@@ -12,13 +12,13 @@ from filelore.index import (
     FileMetadataQuery,
     FileSearchResult,
     FileSegmentMatch,
-    IndexHandler,
 )
 from filelore.search import (
     SEGMENT_GROUP_OVERFETCH_FACTOR,
     SearchRequest,
     SearchService,
     SearchSource,
+    SearchTarget,
 )
 
 
@@ -78,18 +78,13 @@ class RecordingRepository:
 
 
 def handler(
-    target: str,
     factory: Callable[[], RecordingEmbedding],
     *,
-    vector_scope: str = "file",
-) -> IndexHandler:
-    extension = ".png" if target == "image" else ".wav"
-    return IndexHandler(
-        file_type=target,
-        extensions=frozenset({extension}),
+    vector_scope: Literal["file", "segment"] = "file",
+) -> SearchTarget:
+    return SearchTarget(
         embedding_factory=factory,
-        processor_factory=lambda embedding: None,  # type: ignore[arg-type]
-        vector_scope=vector_scope,  # type: ignore[arg-type]
+        vector_scope=vector_scope,
     )
 
 
@@ -115,6 +110,14 @@ def result(
     return FileSearchResult(file=entry, score=score, segment=segment)
 
 
+def test_search_target_requires_a_supported_vector_scope() -> None:
+    with pytest.raises(ValueError, match="scope must be file or segment"):
+        SearchTarget(
+            embedding_factory=lambda: RecordingEmbedding("image"),
+            vector_scope="other",  # type: ignore[arg-type]
+        )
+
+
 def test_service_executes_text_search_reuses_model_and_reports_stages() -> None:
     repository = RecordingRepository(file_results=(result("cat", 0.9),))
     created: list[RecordingEmbedding] = []
@@ -123,7 +126,7 @@ def test_service_executes_text_search_reuses_model_and_reports_stages() -> None:
         created.append(RecordingEmbedding("image"))
         return created[-1]
 
-    service = SearchService(repository, {"image": handler("image", factory)})
+    service = SearchService(repository, {"image": handler(factory)})
     stages: list[str] = []
     request = SearchRequest(
         SearchSource.from_text("orange cat"),
@@ -170,8 +173,8 @@ def test_service_switches_models_when_target_changes() -> None:
     service = SearchService(
         repository,
         {
-            "image": handler("image", image_factory),
-            "audio": handler("audio", audio_factory, vector_scope="segment"),
+            "image": handler(image_factory),
+            "audio": handler(audio_factory, vector_scope="segment"),
         },
     )
 
@@ -197,7 +200,6 @@ def test_service_overfetches_and_groups_segment_results() -> None:
         repository,
         {
             "audio": handler(
-                "audio",
                 lambda: RecordingEmbedding("audio"),
                 vector_scope="segment",
             )
@@ -245,7 +247,7 @@ def test_service_rejects_invalid_request_before_loading_model(
 
     service = SearchService(
         RecordingRepository(),
-        {"image": handler("image", factory)},
+        {"image": handler(factory)},
     )
 
     with pytest.raises(ValueError, match=message):

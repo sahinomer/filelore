@@ -32,6 +32,7 @@ from filelore.search import (
     FileQueryVectorizer,
     SearchRequest,
     SearchService,
+    SearchTarget,
     build_structured_search_request,
     default_file_query_vectorizers,
 )
@@ -44,7 +45,7 @@ AudioEmbeddingFactory = Callable[[], AudioEmbedding]
 InteractiveRunner = Callable[
     [
         FileIndexRepository,
-        Mapping[str, IndexHandler],
+        Mapping[str, SearchTarget],
         Mapping[str, FileQueryVectorizer],
         Sequence[str],
         int,
@@ -247,10 +248,8 @@ def main(
         audio=audio_embedding_factory,
     )
     index_handlers = _index_handlers(embedding_factories)
+    search_targets = _search_targets(index_handlers)
     file_query_vectorizers = default_file_query_vectorizers()
-    handlers_by_type = {
-        handler.file_type: handler for handler in index_handlers
-    }
     query_file: Path | None = args.query_file
     search_request: SearchRequest | None = None
     interactive_terminal = _is_interactive_terminal()
@@ -403,12 +402,12 @@ def main(
                 allowed_targets = (
                     (args.target,)
                     if args.target is not None
-                    else tuple(handlers_by_type)
+                    else tuple(search_targets)
                 )
                 runner = interactive_runner or _run_interactive_search
                 return runner(
                     file_index,
-                    handlers_by_type,
+                    search_targets,
                     file_query_vectorizers,
                     allowed_targets,
                     result_limit,
@@ -418,7 +417,7 @@ def main(
                 file_index,
                 search_request,
                 result_limit,
-                handlers_by_type,
+                search_targets,
                 file_query_vectorizers,
                 display,
             )
@@ -460,7 +459,7 @@ def _can_prompt() -> bool:
 
 def _run_interactive_search(
     file_index: FileIndexRepository,
-    handlers: Mapping[str, IndexHandler],
+    search_targets: Mapping[str, SearchTarget],
     file_query_vectorizers: Mapping[str, FileQueryVectorizer],
     allowed_targets: Sequence[str],
     limit: int,
@@ -469,7 +468,7 @@ def _run_interactive_search(
 
     return run_interactive_search(
         file_index,
-        handlers,
+        search_targets,
         file_query_vectorizers,
         allowed_targets,
         limit,
@@ -495,6 +494,19 @@ def _index_handlers(
             vector_scope="segment",
         ),
     )
+
+
+def _search_targets(
+    index_handlers: Sequence[IndexHandler],
+) -> dict[str, SearchTarget]:
+    """Expose only search-relevant fields from indexing registrations."""
+    return {
+        handler.file_type: SearchTarget(
+            embedding_factory=handler.embedding_factory,
+            vector_scope=handler.vector_scope,
+        )
+        for handler in index_handlers
+    }
 
 
 def _image_processor_for(
@@ -664,7 +676,7 @@ def _search(
     file_index: FileIndexRepository,
     request: SearchRequest,
     limit: int,
-    handlers: Mapping[str, IndexHandler],
+    search_targets: Mapping[str, SearchTarget],
     file_query_vectorizers: Mapping[str, FileQueryVectorizer],
     display: CliDisplay,
 ) -> int:
@@ -674,7 +686,7 @@ def _search(
 
     with SearchService(
         file_index,
-        handlers,
+        search_targets,
         (request.target,),
         file_query_vectorizers=file_query_vectorizers,
     ) as search:

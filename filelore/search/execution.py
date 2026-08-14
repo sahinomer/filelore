@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Collection, Literal, Sequence
+from typing import Any, Collection, Sequence
 
 from filelore.embedding import BaseEmbedding, EmbeddingVector, TextEmbedding
 from filelore.index import FileSearchResult
-from filelore.search.models import SearchResultGroup, SearchSource
+from filelore.search.models import SearchResultGroup, SearchSource, VectorScope
 from filelore.search.protocols import FileQueryVectorizer, SearchRepository
 from filelore.storage import MetadataFilter
-
-
-VectorScope = Literal["file", "segment"]
 
 
 def validate_query_file(

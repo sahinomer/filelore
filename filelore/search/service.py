@@ -7,7 +7,7 @@ from time import perf_counter
 from typing import Any, Callable, Mapping, Sequence
 
 from filelore.embedding import BaseEmbedding
-from filelore.index import IndexHandler, file_metadata_filter
+from filelore.index import file_metadata_filter
 from filelore.search.execution import (
     embed_search_source,
     group_segment_results,
@@ -18,6 +18,7 @@ from filelore.search.models import (
     SearchRequest,
     SearchResponse,
     SearchResultGroup,
+    SearchTarget,
     SearchTimings,
 )
 from filelore.search.protocols import FileQueryVectorizer, SearchRepository
@@ -34,29 +35,35 @@ class SearchService:
     def __init__(
         self,
         repository: SearchRepository,
-        handlers: Mapping[str, IndexHandler],
+        target_configs: Mapping[str, SearchTarget],
         allowed_targets: Sequence[str] | None = None,
         *,
         file_query_vectorizers: Mapping[str, FileQueryVectorizer] | None = None,
     ) -> None:
         selected_targets = tuple(
-            dict.fromkeys(allowed_targets if allowed_targets is not None else handlers)
+            dict.fromkeys(
+                allowed_targets
+                if allowed_targets is not None
+                else target_configs
+            )
         )
         if not selected_targets:
             raise ValueError("Search requires at least one target")
-        unknown = set(selected_targets).difference(handlers)
+        unknown = set(selected_targets).difference(target_configs)
         if unknown:
             raise ValueError(f"Unsupported search target: {sorted(unknown)[0]}")
         self.repository = repository
-        self.handlers = {target: handlers[target] for target in selected_targets}
+        self.target_configs = {
+            target: target_configs[target] for target in selected_targets
+        }
         self.file_query_vectorizers = {
             target: vectorizer
             for target, vectorizer in (file_query_vectorizers or {}).items()
-            if target in self.handlers
+            if target in self.target_configs
         }
         self.targets = selected_targets
         self.default_target = (
-            "image" if "image" in self.handlers else selected_targets[0]
+            "image" if "image" in self.target_configs else selected_targets[0]
         )
         self._active_target: str | None = None
         self._embedding: BaseEmbedding[Any] | None = None
@@ -92,10 +99,10 @@ class SearchService:
             )
             embedding_ms = (perf_counter() - embedding_started) * 1000
 
-            handler = self.handlers[request.target]
+            target_config = self.target_configs[request.target]
             fetch_limit = (
                 limit * SEGMENT_GROUP_OVERFETCH_FACTOR
-                if group_segments and handler.vector_scope == "segment"
+                if group_segments and target_config.vector_scope == "segment"
                 else limit
             )
             fetch_started = perf_counter()
@@ -103,13 +110,13 @@ class SearchService:
                 self.repository,
                 query_vectors,
                 vector_name=embedding.vector_name,
-                vector_scope=handler.vector_scope,
+                vector_scope=target_config.vector_scope,
                 limit=fetch_limit,
                 metadata_filter=file_metadata_filter(request.metadata_query),
             )
             fetch_ms = (perf_counter() - fetch_started) * 1000
 
-            if group_segments and handler.vector_scope == "segment":
+            if group_segments and target_config.vector_scope == "segment":
                 results = group_segment_results(raw_results, limit=limit)
             else:
                 results = tuple(
@@ -143,7 +150,7 @@ class SearchService:
         self.close()
 
     def _validate_request(self, request: SearchRequest, limit: int) -> None:
-        if request.target not in self.handlers:
+        if request.target not in self.target_configs:
             raise ValueError(f"Search target is not enabled: {request.target}")
         if limit < 1:
             raise ValueError("Search limit must be positive")
@@ -171,7 +178,7 @@ class SearchService:
             self._active_target = None
         if on_stage is not None:
             on_stage(f"Initializing {target} model…")
-        embedding = self.handlers[target].embedding_factory()
+        embedding = self.target_configs[target].embedding_factory()
         self._embedding = embedding
         self._active_target = target
         return embedding

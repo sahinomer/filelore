@@ -17,7 +17,6 @@ from filelore.cli_display import search_result_item_renderable
 from filelore.index import (
     FileIndexRepository,
     FileSearchResult,
-    IndexHandler,
 )
 from filelore.search import (
     FileQueryVectorizer,
@@ -25,6 +24,7 @@ from filelore.search import (
     SearchResponse,
     SearchResultGroup,
     SearchService,
+    SearchTarget,
     build_interactive_search_request,
 )
 
@@ -519,7 +519,7 @@ class FileLoreSearchApp(App[None]):
 
 def run_interactive_search(
     file_index: FileIndexRepository,
-    handlers: Mapping[str, IndexHandler],
+    search_targets: Mapping[str, SearchTarget],
     file_query_vectorizers: Mapping[str, FileQueryVectorizer],
     allowed_targets: Sequence[str],
     limit: int,
@@ -527,7 +527,7 @@ def run_interactive_search(
     """Run the full-screen search app until the user exits."""
     session = SearchService(
         file_index,
-        handlers,
+        search_targets,
         allowed_targets,
         file_query_vectorizers=file_query_vectorizers,
     )

@@ -13,6 +13,7 @@ from filelore.search.models import (
     SearchResponse,
     SearchResultGroup,
     SearchSource,
+    SearchTarget,
     SearchTimings,
 )
 from filelore.search.query_parser import (
@@ -50,6 +51,7 @@ __all__ = [
     "SearchService",
     "SearchSource",
     "SearchTimings",
+    "SearchTarget",
     "build_interactive_search_request",
     "build_structured_search_request",
     "default_file_query_vectorizers",

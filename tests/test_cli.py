@@ -23,8 +23,8 @@ from filelore.embedding import (
     EmbeddingVector,
     ImageEmbedding,
 )
-from filelore.index import FileIndexRepository, IndexHandler
-from filelore.search import FileQueryVectorizer
+from filelore.index import FileIndexRepository
+from filelore.search import FileQueryVectorizer, SearchTarget
 from filelore.storage import QdrantVectorDatabase
 
 
@@ -881,13 +881,16 @@ def test_cli_without_arguments_opens_interactive_search_on_a_terminal(
 
     def interactive_runner(
         file_index: object,
-        handlers: Mapping[str, IndexHandler],
+        handlers: Mapping[str, SearchTarget],
         file_query_vectorizers: Mapping[str, FileQueryVectorizer],
         allowed_targets: Sequence[str],
         limit: int,
     ) -> int:
         assert file_index is not None
         assert factory_calls == []
+        assert handlers["image"].embedding_factory is image_embedding_factory
+        assert handlers["image"].vector_scope == "file"
+        assert handlers["audio"].vector_scope == "segment"
         assert tuple(file_query_vectorizers) == ("image", "audio")
         runner_calls.append(
             (tuple(handlers), tuple(allowed_targets), limit)
@@ -929,7 +932,7 @@ def test_interactive_target_constrains_tui_without_loading_a_model(
 
     def interactive_runner(
         file_index: object,
-        handlers: Mapping[str, IndexHandler],
+        handlers: Mapping[str, SearchTarget],
         file_query_vectorizers: Mapping[str, FileQueryVectorizer],
         allowed_targets: Sequence[str],
         limit: int,

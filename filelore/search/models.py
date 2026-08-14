@@ -4,8 +4,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Callable, Literal
 
+from filelore.embedding import BaseEmbedding
 from filelore.index import FileMetadataQuery, FileSearchResult
+
+
+VectorScope = Literal["file", "segment"]
+EmbeddingFactory = Callable[[], BaseEmbedding[Any]]
+
+
+@dataclass(frozen=True, slots=True)
+class SearchTarget:
+    """Model factory and vector scope needed to search one file type."""
+
+    embedding_factory: EmbeddingFactory
+    vector_scope: VectorScope
+
+    def __post_init__(self) -> None:
+        if not callable(self.embedding_factory):
+            raise TypeError("Search target embedding factory must be callable")
+        if self.vector_scope not in {"file", "segment"}:
+            raise ValueError("Search target vector scope must be file or segment")
 
 
 @dataclass(frozen=True, slots=True)

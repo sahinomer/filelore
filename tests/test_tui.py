@@ -21,7 +21,6 @@ from filelore.index import (
     FileIndexEntry,
     FileSearchResult,
     FileSegmentMatch,
-    IndexHandler,
 )
 from filelore.search import (
     AudioFileQueryVectorizer,
@@ -30,6 +29,7 @@ from filelore.search import (
     SearchRequest,
     SearchService,
     SearchSource,
+    SearchTarget,
     group_segment_results,
     parse_search_query,
 )
@@ -171,12 +171,9 @@ class RecordingSearchRepository:
 def handler(
     target: str,
     factory: Callable[[], BaseEmbedding[Any]],
-) -> IndexHandler:
-    return IndexHandler(
-        file_type=target,
-        extensions=frozenset({".png" if target == "image" else ".wav"}),
+) -> SearchTarget:
+    return SearchTarget(
         embedding_factory=factory,
-        processor_factory=lambda embedding: None,  # type: ignore[arg-type]
         vector_scope="file" if target == "image" else "segment",
     )
 
