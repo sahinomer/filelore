@@ -65,11 +65,47 @@ class QueryInput(Input):
         ),
     ]
 
+    def action_cursor_right(self, select: bool = False) -> None:
+        """Accept path completions, quoting paths containing whitespace."""
+        if not select and self.cursor_at_end and self._suggestion:
+            completion = self._suggestion
+            if (
+                completion[0] not in {'"', "'"}
+                and any(character.isspace() for character in completion)
+            ):
+                trailing_separator = completion.endswith(("/", "\\"))
+                completion = f'"{completion}'
+                if not trailing_separator:
+                    completion += '"'
+                self.value = completion
+                self.cursor_position = len(self.value)
+                return
+        super().action_cursor_right(select)
+
     def action_complete_or_focus_next(self) -> None:
         if self.cursor_at_end and self._suggestion:
             self.action_cursor_right()
         else:
             self.app.action_focus_next()
+
+    def refresh_completion(self) -> None:
+        """Discard a stale completion and request one for the current value."""
+        self._suggestion = ""
+        suggester = self.suggester
+        value = self.value
+        if suggester is None or not value:
+            return
+
+        async def update_completion() -> None:
+            suggestion = await suggester.get_suggestion(value)
+            if self.suggester is suggester and self.value == value:
+                self._suggestion = suggestion or ""
+
+        self.run_worker(
+            update_completion(),
+            exclusive=True,
+            group="target-path-completion",
+        )
 
 
 class QueryBar(Horizontal):
@@ -145,8 +181,8 @@ class QueryBar(Horizontal):
         yield Button("Browse", id="browse-query-file")
 
     @property
-    def input(self) -> Input:
-        return self.query_one("#query", Input)
+    def input(self) -> QueryInput:
+        return self.query_one("#query", QueryInput)
 
     @property
     def value(self) -> str:
@@ -191,6 +227,15 @@ class QueryBar(Horizontal):
             if self.attached_file is not None
             else f"Describe {label} or enter a file path…"
         )
+
+    def update_supported_extensions(
+        self,
+        supported_extensions: Collection[str],
+    ) -> None:
+        """Restrict path completion to the currently selected target."""
+        self.path_suggester.update_supported_extensions(supported_extensions)
+        if self.attached_file is None:
+            self.input.refresh_completion()
 
     def set_controls_disabled(self, disabled: bool) -> None:
         self.input.disabled = disabled

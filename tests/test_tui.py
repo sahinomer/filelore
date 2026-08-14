@@ -80,10 +80,14 @@ async def test_path_suggester_completes_supported_files_and_directories(
 ) -> None:
     (tmp_path / "samples").mkdir()
     (tmp_path / "reference.wav").touch()
+    (tmp_path / "reference recording.wav").touch()
     (tmp_path / "readme.txt").touch()
     suggester = FileSystemPathSuggester(tmp_path, {".wav", ".png"})
 
-    assert await suggester.get_suggestion("ref") == "reference.wav"
+    assert await suggester.get_suggestion("reference.") == "reference.wav"
+    assert await suggester.get_suggestion("reference r") == (
+        "reference recording.wav"
+    )
     assert await suggester.get_suggestion("sam") == f"samples{os.sep}"
     assert await suggester.get_suggestion("readm") is None
 
@@ -318,12 +322,14 @@ async def test_tui_uses_target_search_layout_and_limit_options(
 
 
 @pytest.mark.anyio
-async def test_tui_file_picker_attaches_file_and_infers_target(
+async def test_tui_file_picker_filters_files_for_selected_target(
     tmp_path: Path,
 ) -> None:
-    query_path = tmp_path / "reference.wav"
+    image_path = tmp_path / "reference.png"
+    audio_path = tmp_path / "reference.wav"
     unsupported_path = tmp_path / "notes.txt"
-    create_wave(query_path)
+    image_path.touch()
+    create_wave(audio_path)
     unsupported_path.touch()
     session = SearchService(
         RecordingSearchRepository(),  # type: ignore[arg-type]
@@ -352,13 +358,30 @@ async def test_tui_file_picker_attaches_file_and_infers_target(
 
         assert isinstance(app.screen, FilePickerScreen)
         tree = app.screen.query_one(SupportedFileTree)
-        assert set(tree.filter_paths((query_path, unsupported_path))) == {
-            query_path
+        assert set(
+            tree.filter_paths((image_path, audio_path, unsupported_path))
+        ) == {
+            image_path
         }
-        app.screen.dismiss(query_path.resolve())
+        app.screen.dismiss(None)
         await pilot.pause()
 
-        assert query_bar.attached_file == query_path.resolve()
+        app.query_one("#target", Select).value = "audio"
+        await pilot.pause()
+        await pilot.click("#browse-query-file")
+        await pilot.pause()
+
+        assert isinstance(app.screen, FilePickerScreen)
+        tree = app.screen.query_one(SupportedFileTree)
+        assert set(
+            tree.filter_paths((image_path, audio_path, unsupported_path))
+        ) == {
+            audio_path
+        }
+        app.screen.dismiss(audio_path.resolve())
+        await pilot.pause()
+
+        assert query_bar.attached_file == audio_path.resolve()
         assert query_bar.value == ""
         assert query_bar.input.suggester is None
         assert app.query_one("#target", Select).value == "audio"
@@ -376,6 +399,42 @@ async def test_tui_file_picker_attaches_file_and_infers_target(
         await pilot.press("escape")
         await pilot.pause()
         assert not isinstance(app.screen, FilePickerScreen)
+
+
+@pytest.mark.anyio
+async def test_tui_path_suggestions_follow_selected_target(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "reference.png").touch()
+    create_wave(tmp_path / "reference.wav")
+    session = SearchService(
+        RecordingSearchRepository(),  # type: ignore[arg-type]
+        {
+            "image": handler("image", RecordingImageEmbedding),
+            "audio": handler("audio", RecordingAudioEmbedding),
+        },
+        ("image", "audio"),
+        file_query_vectorizers={
+            "image": ImageFileQueryVectorizer(),
+            "audio": AudioFileQueryVectorizer(),
+        },
+    )
+    app = FileLoreSearchApp(
+        session,
+        limit=20,
+        working_directory=tmp_path,
+    )
+
+    async with app.run_test(size=(100, 32)) as pilot:
+        query_bar = app.query_one(QueryBar)
+        query_bar.value = "ref"
+        await pilot.pause()
+        assert query_bar.input._suggestion == "reference.png"
+
+        app.query_one("#target", Select).value = "audio"
+        await pilot.pause()
+
+        assert query_bar.input._suggestion == "reference.wav"
 
 
 @pytest.mark.anyio
@@ -402,6 +461,71 @@ async def test_tui_accepts_filesystem_completion(
         await pilot.pause()
 
         assert query.value == "reference.png"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("completion_key", ("right", "tab"))
+async def test_tui_quotes_completed_file_paths_containing_spaces(
+    tmp_path: Path,
+    completion_key: str,
+) -> None:
+    query_path = tmp_path / "reference image.png"
+    query_path.touch()
+    repository = RecordingSearchRepository()
+    created: list[RecordingImageEmbedding] = []
+    app = FileLoreSearchApp(
+        image_session(repository, created),
+        limit=20,
+        working_directory=tmp_path,
+    )
+
+    async with app.run_test(size=(100, 32)) as pilot:
+        query = app.query_one("#query", Input)
+        query.value = "reference i"
+        await pilot.pause()
+
+        await pilot.press(completion_key)
+        await pilot.pause()
+
+        assert query.value == '"reference image.png"'
+
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert app.query_one(QueryBar).attached_file == query_path.resolve()
+
+
+@pytest.mark.anyio
+async def test_tui_continues_completion_inside_directory_with_spaces(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "sample recordings"
+    directory.mkdir()
+    query_path = directory / "reference image.png"
+    query_path.touch()
+    repository = RecordingSearchRepository()
+    created: list[RecordingImageEmbedding] = []
+    app = FileLoreSearchApp(
+        image_session(repository, created),
+        limit=20,
+        working_directory=tmp_path,
+    )
+
+    async with app.run_test(size=(100, 32)) as pilot:
+        query = app.query_one("#query", Input)
+        query.value = "sample r"
+        await pilot.pause()
+
+        await pilot.press("tab")
+        await pilot.pause()
+        assert query.value == f'"sample recordings{os.sep}'
+
+        await pilot.press("tab")
+        await pilot.pause()
+        assert query.value == (
+            f'"sample recordings{os.sep}reference image.png"'
+        )
 
 
 @pytest.mark.anyio

@@ -259,7 +259,9 @@ class FileLoreSearchApp(App[None]):
                 )
                 yield QueryBar(
                     working_directory=self.working_directory,
-                    supported_extensions=self._supported_file_extensions(),
+                    supported_extensions=self._supported_file_extensions(
+                        self.session.default_target
+                    ),
                 )
                 yield Static("Limit", id="limit-label")
                 yield Select[int](
@@ -438,7 +440,7 @@ class FileLoreSearchApp(App[None]):
         self.push_screen(
             FilePickerScreen(
                 self.working_directory,
-                self._supported_file_extensions(),
+                self._supported_file_extensions(self._selected_target()),
             ),
             self._attach_query_file,
         )
@@ -472,6 +474,9 @@ class FileLoreSearchApp(App[None]):
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "target" and isinstance(event.value, str):
             query_bar = self.query_one(QueryBar)
+            query_bar.update_supported_extensions(
+                self._supported_file_extensions(event.value)
+            )
             attached_file = query_bar.attached_file
             if (
                 attached_file is not None
@@ -494,11 +499,12 @@ class FileLoreSearchApp(App[None]):
             for target in self.session.targets
         )
 
-    def _supported_file_extensions(self) -> frozenset[str]:
-        return frozenset(
-            extension
-            for vectorizer in self.session.file_query_vectorizers.values()
-            for extension in vectorizer.supported_extensions
+    def _supported_file_extensions(self, target: str) -> frozenset[str]:
+        vectorizer = self.session.file_query_vectorizers.get(target)
+        return (
+            frozenset(vectorizer.supported_extensions)
+            if vectorizer is not None
+            else frozenset()
         )
 
     def _selected_target(self) -> str:

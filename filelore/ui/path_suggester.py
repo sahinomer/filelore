@@ -20,6 +20,14 @@ class FileSystemPathSuggester(Suggester):
     ) -> None:
         super().__init__(use_cache=False, case_sensitive=True)
         self.working_directory = working_directory.resolve()
+        self.supported_extensions: frozenset[str] = frozenset()
+        self.update_supported_extensions(supported_extensions)
+
+    def update_supported_extensions(
+        self,
+        supported_extensions: Collection[str],
+    ) -> None:
+        """Replace the file formats offered by future completions."""
         self.supported_extensions = frozenset(
             extension.casefold()
             if extension.startswith(".")
@@ -57,16 +65,7 @@ class FileSystemPathSuggester(Suggester):
         if not candidates:
             return None
 
-        candidate = next(
-            (
-                entry
-                for entry in candidates
-                if quote or not any(character.isspace() for character in entry.name)
-            ),
-            None,
-        )
-        if candidate is None:
-            return None
+        candidate = candidates[0]
         typed_parent = (
             path_value
             if trailing_separator
