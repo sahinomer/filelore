@@ -34,6 +34,7 @@ def create_image(path: Path, *, size: tuple[int, int] = (12, 8)) -> None:
 
 
 def create_wave(path: Path, *, duration_seconds: float = 0.25) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     sample_rate = 8_000
     frame_count = round(duration_seconds * sample_rate)
     with wave.open(str(path), "wb") as output:
@@ -887,7 +888,7 @@ def test_cli_without_arguments_opens_interactive_search_on_a_terminal(
     ) -> int:
         assert file_index is not None
         assert factory_calls == []
-        assert tuple(file_query_vectorizers) == ("image",)
+        assert tuple(file_query_vectorizers) == ("image", "audio")
         runner_calls.append(
             (tuple(handlers), tuple(allowed_targets), limit)
         )
@@ -935,7 +936,7 @@ def test_interactive_target_constrains_tui_without_loading_a_model(
     ) -> int:
         assert file_index is not None
         assert tuple(handlers) == ("image", "audio")
-        assert tuple(file_query_vectorizers) == ("image",)
+        assert tuple(file_query_vectorizers) == ("image", "audio")
         assert limit == DEFAULT_RESULT_LIMIT
         assert factory_calls == []
         runner_calls.append(tuple(allowed_targets))
@@ -1193,6 +1194,49 @@ def test_cli_searches_raw_audio_chunks_with_metadata_filters(
     assert "128 kbps" in captured.out
     assert "Chunk" in captured.out
     assert "0:00.00" in captured.out
+
+
+def test_cli_searches_audio_chunks_with_a_chunked_query_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database_path = tmp_path / "qdrant-index"
+    indexed = tmp_path / "indexed"
+    audio_path = indexed / "effect.wav"
+    query_path = tmp_path / "reference.wav"
+    create_wave(audio_path)
+    create_wave(query_path)
+
+    assert main(
+        [
+            "--index",
+            str(indexed),
+            "--yes",
+            "--index-type",
+            "audio",
+            "--index-path",
+            str(database_path),
+        ],
+        audio_embedding_factory=ChunkedAudioCliEmbedding,
+    ) == 0
+    capsys.readouterr()
+
+    exit_code = main(
+        [
+            "--query-file",
+            str(query_path),
+            "--index-path",
+            str(database_path),
+        ],
+        audio_embedding_factory=ChunkedAudioCliEmbedding,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out.count(audio_path.name) == 4
+    assert "4 results" in captured.out
+    assert "Files similar to" in captured.out
+    assert query_path.name in captured.out
 
 
 def test_cli_shows_search_model_initialization_on_stderr(

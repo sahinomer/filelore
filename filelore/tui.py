@@ -784,7 +784,9 @@ def _query_help_text(target: str) -> str:
             "bitrate:192000     Exact bitrate in bits per second\n"
             "longer-than:1.5    Duration greater than seconds\n"
             "shorter-than:30    Duration less than seconds\n\n"
-            "Example: glass breaking format:wav longer-than:1"
+            "Text example: glass breaking format:wav longer-than:1\n"
+            "File mode: enter a reference audio path, then put optional "
+            "filters in the separate filter field."
         )
     else:
         specific = (

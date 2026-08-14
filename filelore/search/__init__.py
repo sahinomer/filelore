@@ -1,5 +1,6 @@
 """Modality-independent query preparation and similarity search."""
 
+from filelore.search.audio import AudioFileQueryVectorizer
 from filelore.search.core import (
     FileQueryVectorizer,
     SearchRepository,
@@ -11,6 +12,7 @@ from filelore.search.core import (
 from filelore.search.image import ImageFileQueryVectorizer
 
 __all__ = [
+    "AudioFileQueryVectorizer",
     "FileQueryVectorizer",
     "ImageFileQueryVectorizer",
     "SearchRepository",

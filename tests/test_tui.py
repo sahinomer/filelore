@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import wave
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -23,7 +24,11 @@ from filelore.index import (
     IndexHandler,
 )
 from filelore.search_query import parse_search_query
-from filelore.search import ImageFileQueryVectorizer, SearchSource
+from filelore.search import (
+    AudioFileQueryVectorizer,
+    ImageFileQueryVectorizer,
+    SearchSource,
+)
 from filelore.tui import (
     AUDIO_OVERFETCH_FACTOR,
     FileLoreSearchApp,
@@ -37,6 +42,16 @@ from filelore.tui import (
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+def create_wave(path: Path, *, duration_seconds: float = 0.25) -> None:
+    sample_rate = 8_000
+    frame_count = round(duration_seconds * sample_rate)
+    with wave.open(str(path), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(sample_rate)
+        output.writeframes(b"\x00\x00" * frame_count)
 
 
 class RecordingImageEmbedding(ImageEmbedding):
@@ -54,7 +69,9 @@ class RecordingImageEmbedding(ImageEmbedding):
         self,
         items: Sequence[str | Path | Image.Image],
     ) -> tuple[EmbeddingVector, ...]:
-        self.images.extend(Path(item) for item in items if not isinstance(item, Image.Image))
+        self.images.extend(
+            Path(item) for item in items if not isinstance(item, Image.Image)
+        )
         return tuple((1.0, 0.0, 0.0) for _ in items)
 
     def predict_text_batch(
@@ -79,12 +96,14 @@ class RecordingAudioEmbedding(AudioEmbedding):
             dimensions=3,
         )
         self.texts: list[str] = []
+        self.audio_inputs: list[AudioInput] = []
         self.close_count = 0
 
     def predict_batch(
         self,
         items: Sequence[AudioInput],
     ) -> tuple[EmbeddingVector, ...]:
+        self.audio_inputs.extend(items)
         return tuple((0.0, 1.0, 0.0) for _ in items)
 
     def predict_text_batch(
@@ -524,6 +543,64 @@ async def test_tui_audio_search_uses_filters_overfetches_and_groups_chunks(
         status = str(app.query_one("#status", Static).content)
         assert "Found 1 file" in status
         assert "grouped 2 audio chunks into 1 file" in status
+
+
+@pytest.mark.anyio
+async def test_tui_searches_for_audio_similar_to_a_file(
+    tmp_path: Path,
+) -> None:
+    query_path = tmp_path / "reference.wav"
+    create_wave(query_path)
+    path = tmp_path / "crash.wav"
+    repository = RecordingSearchRepository(
+        segment_results=(
+            audio_result(
+                path,
+                entry_id="crash",
+                segment_index=0,
+                score=0.7,
+            ),
+            audio_result(
+                path,
+                entry_id="crash",
+                segment_index=1,
+                score=0.9,
+            ),
+        )
+    )
+    audios: list[RecordingAudioEmbedding] = []
+
+    def factory() -> RecordingAudioEmbedding:
+        audios.append(RecordingAudioEmbedding())
+        return audios[-1]
+
+    session = SearchSession(
+        repository,  # type: ignore[arg-type]
+        {"audio": handler("audio", factory)},
+        ("audio",),
+        file_query_vectorizers={"audio": AudioFileQueryVectorizer()},
+    )
+    app = FileLoreSearchApp(session, limit=10)
+
+    async with app.run_test(size=(110, 38)) as pilot:
+        app.query_one("#query-mode", Select).value = "file"
+        await pilot.pause()
+        app.query_one("#query", Input).value = str(query_path)
+        app.query_one("#file-filters", Input).value = "format:wav"
+
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert len(audios) == 1
+        assert audios[0].texts == []
+        assert len(audios[0].audio_inputs) == 1
+        assert repository.calls[0]["scope"] == "segment"
+        assert repository.calls[0]["limit"] == 10 * AUDIO_OVERFETCH_FACTOR
+        assert len(app.query(SearchResultCard)) == 1
+        assert "grouped 2 audio chunks into 1 file" in str(
+            app.query_one("#status", Static).content
+        )
 
 
 @pytest.mark.anyio

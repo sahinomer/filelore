@@ -33,6 +33,7 @@ from filelore.index import (
 from filelore.metadata import AudioMetadataParser, ImageMetadataParser
 from filelore.processors import AudioProcessor, ImageProcessor
 from filelore.search import (
+    AudioFileQueryVectorizer,
     FileQueryVectorizer,
     ImageFileQueryVectorizer,
     SearchSource,
@@ -601,7 +602,10 @@ def _index_handlers(
 
 def _file_query_vectorizers() -> dict[str, FileQueryVectorizer]:
     """Return file-query adapters enabled for each search target."""
-    return {"image": ImageFileQueryVectorizer()}
+    return {
+        "image": ImageFileQueryVectorizer(),
+        "audio": AudioFileQueryVectorizer(),
+    }
 
 
 def _image_processor_for(

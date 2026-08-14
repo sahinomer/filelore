@@ -1,14 +1,26 @@
 from __future__ import annotations
 
+import wave
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
 
 import pytest
 
-from filelore.embedding import BaseEmbedding, EmbeddingVector, TextEmbedding
+from filelore.embedding import (
+    AudioEmbedding,
+    AudioInput,
+    BaseEmbedding,
+    EmbeddingVector,
+    TextEmbedding,
+)
 from filelore.index import FileIndexEntry, FileSearchResult, FileSegmentMatch
-from filelore.search import SearchSource, embed_search_source, search_vectors
+from filelore.search import (
+    AudioFileQueryVectorizer,
+    SearchSource,
+    embed_search_source,
+    search_vectors,
+)
 
 
 class RecordingTextEmbedding(TextEmbedding[str]):
@@ -42,6 +54,33 @@ class RecordingFileVectorizer:
         assert embedding.vector_name == "text_test"
         self.paths.append(path)
         return ((1.0, 0.0), (0.0, 1.0))
+
+
+class RecordingAudioEmbedding(AudioEmbedding):
+    sampling_rate = 48_000
+    max_length_seconds = 0.1
+    batch_size = 2
+
+    def __init__(self) -> None:
+        super().__init__(
+            model_id="audio-test",
+            vector_name="audio_test",
+            dimensions=2,
+        )
+        self.audio_inputs: list[AudioInput] = []
+
+    def predict_batch(
+        self,
+        items: Sequence[AudioInput],
+    ) -> tuple[EmbeddingVector, ...]:
+        self.audio_inputs.extend(items)
+        return tuple((1.0, 0.0) for _ in items)
+
+    def predict_text_batch(
+        self,
+        texts: Sequence[str],
+    ) -> tuple[EmbeddingVector, ...]:
+        return tuple((0.0, 1.0) for _ in texts)
 
 
 class RecordingRepository:
@@ -109,6 +148,29 @@ def test_embed_search_source_supports_text_and_file_vectors() -> None:
     ) == ((1.0, 0.0), (0.0, 1.0))
     assert embedding.texts == ["orange cat"]
     assert vectorizer.paths == [Path("query.example")]
+
+
+def test_audio_file_query_uses_index_equivalent_overlapping_chunks(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "query.wav"
+    sample_rate = 8_000
+    frame_count = round(0.25 * sample_rate)
+    with wave.open(str(path), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(sample_rate)
+        output.writeframes(b"\x00\x00" * frame_count)
+    embedding = RecordingAudioEmbedding()
+
+    vectors = AudioFileQueryVectorizer().predict_file(path, embedding)
+
+    assert vectors == ((1.0, 0.0),) * 4
+    assert len(embedding.audio_inputs) == 4
+    assert all(
+        item.sampling_rate == embedding.sampling_rate
+        for item in embedding.audio_inputs
+    )
 
 
 def test_search_vectors_merges_multi_vector_results_by_best_score() -> None:

@@ -13,8 +13,9 @@ and retrieval under the user's control.
 - Store indexes locally or in a configured Qdrant service.
 
 The current implementation supports image and audio indexing, text-to-image,
-image-to-image, and text-to-audio search through the CLI and TUI, raw audio
-chunk results in the CLI, and grouped expandable audio results in the TUI.
+image-to-image, text-to-audio, and audio-to-audio search through the CLI and
+TUI, raw audio chunk results in the CLI, and grouped expandable audio results
+in the TUI.
 
 ## Setup
 
@@ -95,9 +96,9 @@ is submitted, retains it for later searches, and releases it before switching
 to the other target. Supplying `--target image` or `--target audio` when the
 TUI is launched constrains the selector to that target.
 
-For image searches, select File beside the target and enter a reference image
-path to find visually similar indexed images. Optional result filters have a
-separate field in File mode. Audio currently offers Text mode only.
+Select File beside either target and enter a reference image or audio path to
+find similar indexed media. Optional result filters have a separate field in
+File mode.
 
 Interactive queries may combine semantic text with the metadata currently
 stored in the index. Image queries support:
@@ -137,6 +138,15 @@ Metadata flags still filter the indexed results rather than the query file:
 ```sh
 uv run python -m filelore --query-file /path/to/reference.png \
   --format jpeg --min-resolution 1920x1080
+```
+
+Audio file queries are divided into the same overlapping model-sized chunks
+used during indexing. Each query chunk searches the indexed audio segments,
+and duplicate segment matches retain their best score:
+
+```sh
+uv run python -m filelore --query-file /path/to/reference.wav \
+  --format wav --longer-than 1 --shorter-than 30
 ```
 
 Search the index with a natural-language description:
