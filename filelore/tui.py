@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-from threading import RLock
-from time import perf_counter
-from typing import Any, Callable, Mapping, Sequence
+from typing import Mapping, Sequence
 
 from rich.table import Table
 from rich.text import Text
@@ -18,216 +14,19 @@ from textual.widgets import Collapsible, Footer, Header, Input, Select, Static
 from textual.worker import get_current_worker
 
 from filelore.cli_display import search_result_item_renderable
-from filelore.embedding import BaseEmbedding
 from filelore.index import (
     FileIndexRepository,
-    FileMetadataQuery,
     FileSearchResult,
     IndexHandler,
-    file_metadata_filter,
-)
-from filelore.search_query import (
-    parse_search_query,
-    parse_search_filters,
-    validate_search_metadata,
 )
 from filelore.search import (
     FileQueryVectorizer,
-    SearchSource,
-    embed_search_source,
-    search_vectors,
-    validate_query_file,
+    SearchRequest,
+    SearchResponse,
+    SearchResultGroup,
+    SearchService,
+    build_interactive_search_request,
 )
-
-
-AUDIO_OVERFETCH_FACTOR = 5
-StageCallback = Callable[[str], None]
-
-
-@dataclass(frozen=True, slots=True)
-class SearchResultEntity:
-    """One visible file result with optional matching audio chunks."""
-
-    result: FileSearchResult
-    chunks: tuple[FileSearchResult, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class SearchResponse:
-    source: SearchSource
-    filters: tuple[tuple[str, str], ...]
-    target: str
-    results: tuple[SearchResultEntity, ...]
-    limit: int
-    grouped_chunk_count: int
-    grouped_file_count: int
-    embedding_ms: float
-    fetch_ms: float
-    total_ms: float
-
-
-class SearchSession:
-    """Lazily retain one target model across interactive searches."""
-
-    def __init__(
-        self,
-        file_index: FileIndexRepository,
-        handlers: Mapping[str, IndexHandler],
-        allowed_targets: Sequence[str],
-        *,
-        file_query_vectorizers: Mapping[str, FileQueryVectorizer] | None = None,
-    ) -> None:
-        selected_targets = tuple(dict.fromkeys(allowed_targets))
-        if not selected_targets:
-            raise ValueError("Interactive search requires at least one target")
-        unknown = set(selected_targets).difference(handlers)
-        if unknown:
-            raise ValueError(f"Unsupported interactive target: {sorted(unknown)[0]}")
-        self.file_index = file_index
-        self.handlers = {
-            target: handlers[target] for target in selected_targets
-        }
-        self.file_query_vectorizers = {
-            target: vectorizer
-            for target, vectorizer in (file_query_vectorizers or {}).items()
-            if target in self.handlers
-        }
-        self.targets = selected_targets
-        self.default_target = (
-            "image" if "image" in self.handlers else selected_targets[0]
-        )
-        self._active_target: str | None = None
-        self._embedding: BaseEmbedding[Any] | None = None
-        self._lock = RLock()
-
-    @property
-    def active_target(self) -> str | None:
-        return self._active_target
-
-    def search(
-        self,
-        source: SearchSource,
-        metadata_query: FileMetadataQuery,
-        target: str,
-        limit: int,
-        *,
-        filters: tuple[tuple[str, str], ...] = (),
-        on_stage: StageCallback | None = None,
-    ) -> SearchResponse:
-        if target not in self.handlers:
-            raise ValueError(f"Interactive target is not enabled: {target}")
-        if limit < 1:
-            raise ValueError("Search limit must be positive")
-        validate_search_metadata(metadata_query, target)
-        file_vectorizer = self.file_query_vectorizers.get(target)
-        if source.file is not None:
-            if file_vectorizer is None:
-                raise ValueError(
-                    f"File similarity search is not enabled for {target}"
-                )
-            validate_query_file(
-                source.file,
-                file_vectorizer.supported_extensions,
-            )
-
-        with self._lock:
-            total_started = perf_counter()
-            embedding = self._activate(target, on_stage=on_stage)
-            if on_stage is not None:
-                on_stage(f"Searching {target} files…")
-            embedding_started = perf_counter()
-            query_vectors = embed_search_source(
-                source,
-                embedding,
-                file_vectorizer=file_vectorizer,
-            )
-            embedding_ms = (perf_counter() - embedding_started) * 1000
-
-            fetch_started = perf_counter()
-            handler = self.handlers[target]
-            fetch_limit = (
-                limit * AUDIO_OVERFETCH_FACTOR
-                if handler.vector_scope == "segment"
-                else limit
-            )
-            raw_results = search_vectors(
-                self.file_index,
-                query_vectors,
-                vector_name=embedding.vector_name,
-                vector_scope=handler.vector_scope,
-                limit=fetch_limit,
-                metadata_filter=file_metadata_filter(
-                    metadata_query
-                ),
-            )
-            fetch_ms = (perf_counter() - fetch_started) * 1000
-
-            if handler.vector_scope == "segment":
-                results = group_audio_results(raw_results, limit=limit)
-            else:
-                results = tuple(
-                    SearchResultEntity(result) for result in raw_results[:limit]
-                )
-            grouped_results = tuple(item for item in results if item.chunks)
-            return SearchResponse(
-                source=source,
-                filters=filters,
-                target=target,
-                results=results,
-                limit=limit,
-                grouped_chunk_count=sum(
-                    len(item.chunks) for item in grouped_results
-                ),
-                grouped_file_count=len(grouped_results),
-                embedding_ms=embedding_ms,
-                fetch_ms=fetch_ms,
-                total_ms=(perf_counter() - total_started) * 1000,
-            )
-
-    def close(self) -> None:
-        """Release the currently active model, if any."""
-        with self._lock:
-            if self._embedding is not None:
-                self._embedding.close()
-            self._embedding = None
-            self._active_target = None
-
-    def _activate(
-        self,
-        target: str,
-        *,
-        on_stage: StageCallback | None,
-    ) -> BaseEmbedding[Any]:
-        if self._embedding is not None and self._active_target == target:
-            return self._embedding
-        if self._embedding is not None:
-            self._embedding.close()
-            self._embedding = None
-            self._active_target = None
-        if on_stage is not None:
-            on_stage(f"Loading {target} model…")
-        embedding = self.handlers[target].embedding_factory()
-        self._embedding = embedding
-        self._active_target = target
-        return embedding
-
-
-def group_audio_results(
-    results: Sequence[FileSearchResult],
-    *,
-    limit: int,
-) -> tuple[SearchResultEntity, ...]:
-    """Group raw segment matches by parent file and keep best-first chunks."""
-    groups: dict[str, list[FileSearchResult]] = {}
-    for result in results:
-        groups.setdefault(result.file.id, []).append(result)
-
-    entities: list[SearchResultEntity] = []
-    for matches in groups.values():
-        ranked = tuple(sorted(matches, key=lambda item: item.score, reverse=True))
-        entities.append(SearchResultEntity(result=ranked[0], chunks=ranked))
-    entities.sort(key=lambda item: item.result.score, reverse=True)
-    return tuple(entities[:limit])
 
 
 class QueryHelpScreen(ModalScreen[None]):
@@ -292,7 +91,7 @@ class SearchResultCard(Vertical):
 
     def __init__(
         self,
-        entity: SearchResultEntity,
+        entity: SearchResultGroup,
         *,
         rank: int,
     ) -> None:
@@ -309,14 +108,14 @@ class SearchResultCard(Vertical):
             ),
             classes="result-summary",
         )
-        if self.entity.chunks:
+        if self.entity.matches:
             yield Collapsible(
                 Static(
-                    _chunk_matches_renderable(self.entity.chunks),
+                    _chunk_matches_renderable(self.entity.matches),
                     classes="chunk-matches",
                 ),
                 title=(
-                    f"{len(self.entity.chunks)} matching chunks "
+                    f"{len(self.entity.matches)} matching chunks "
                     "(best first)"
                 ),
                 collapsed=True,
@@ -447,7 +246,7 @@ class FileLoreSearchApp(App[None]):
     }
     """
 
-    def __init__(self, session: SearchSession, *, limit: int) -> None:
+    def __init__(self, session: SearchService, *, limit: int) -> None:
         super().__init__()
         self.session = session
         self.initial_limit = limit
@@ -507,35 +306,18 @@ class FileLoreSearchApp(App[None]):
         if self._searching:
             return
         try:
-            target = self._selected_target()
-            query_value = self.query_one("#query", Input).value
-            if self._query_mode == "file":
-                vectorizer = self.session.file_query_vectorizers.get(target)
-                if vectorizer is None:
-                    raise ValueError(
-                        f"File similarity search is not enabled for {target}"
-                    )
-                prepared_path = validate_query_file(
-                    Path(query_value),
-                    vectorizer.supported_extensions,
-                )
-                source = SearchSource.from_file(prepared_path)
-                parsed_filters = parse_search_filters(
-                    self.query_one("#file-filters", Input).value
-                )
-                metadata_query = parsed_filters.metadata_query
-                filters = parsed_filters.filters
-            else:
-                parsed_query = parse_search_query(query_value)
-                source = SearchSource.from_text(parsed_query.semantic_query)
-                metadata_query = parsed_query.metadata_query
-                filters = parsed_query.filters
-            validate_search_metadata(metadata_query, target)
+            request = build_interactive_search_request(
+                self.query_one("#query", Input).value,
+                mode=self._query_mode,
+                target=self._selected_target(),
+                file_filters=self.query_one("#file-filters", Input).value,
+                file_query_vectorizers=self.session.file_query_vectorizers,
+            )
         except ValueError as error:
             self._show_error(str(error))
             return
 
-        self._show_filters(filters)
+        self._show_filters(request.filters)
         self._searching = True
         self.query_one("#query", Input).disabled = True
         self.query_one("#file-filters", Input).disabled = True
@@ -547,21 +329,12 @@ class FileLoreSearchApp(App[None]):
         if not isinstance(selected_limit, int):
             selected_limit = self.initial_limit
         self._set_status("Searching…", "searching")
-        self.execute_search(
-            source,
-            metadata_query,
-            filters,
-            target,
-            selected_limit,
-        )
+        self.execute_search(request, selected_limit)
 
     @work(exclusive=True, thread=True, group="search", exit_on_error=False)
     def execute_search(
         self,
-        source: SearchSource,
-        metadata_query: FileMetadataQuery,
-        filters: tuple[tuple[str, str], ...],
-        target: str,
+        request: SearchRequest,
         limit: int,
     ) -> None:
         worker = get_current_worker()
@@ -576,11 +349,9 @@ class FileLoreSearchApp(App[None]):
 
         try:
             response = self.session.search(
-                source,
-                metadata_query,
-                target,
+                request,
                 limit,
-                filters=filters,
+                group_segments=True,
                 on_stage=update_stage,
             )
         except Exception as error:
@@ -611,19 +382,19 @@ class FileLoreSearchApp(App[None]):
 
         file_label = "file" if len(response.results) == 1 else "files"
         status = f"Found {len(response.results)} {file_label}"
-        if response.grouped_chunk_count:
+        if response.grouped_match_count:
             chunk_label = (
-                "chunk" if response.grouped_chunk_count == 1 else "chunks"
+                "chunk" if response.grouped_match_count == 1 else "chunks"
             )
             grouped_file_label = (
                 "file" if response.grouped_file_count == 1 else "files"
             )
             status += (
-                f"  •  grouped {response.grouped_chunk_count} audio "
+                f"  •  grouped {response.grouped_match_count} audio "
                 f"{chunk_label} "
                 f"into {response.grouped_file_count} {grouped_file_label}"
             )
-        status += f"  •  {_format_duration(response.total_ms)}"
+        status += f"  •  {_format_duration(response.timings.total_ms)}"
         self._set_status(status)
         self._finish_search()
 
@@ -754,7 +525,7 @@ def run_interactive_search(
     limit: int,
 ) -> int:
     """Run the full-screen search app until the user exits."""
-    session = SearchSession(
+    session = SearchService(
         file_index,
         handlers,
         allowed_targets,

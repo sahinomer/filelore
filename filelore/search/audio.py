@@ -8,7 +8,7 @@ from typing import Any
 from filelore.embedding import AudioEmbedding, BaseEmbedding, EmbeddingVector
 from filelore.metadata import AudioMetadataParser
 from filelore.processors import AudioProcessor
-from filelore.search.core import validate_query_file
+from filelore.search.execution import validate_query_file
 
 
 class AudioFileQueryVectorizer:

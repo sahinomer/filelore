@@ -23,19 +23,20 @@ from filelore.index import (
     FileSegmentMatch,
     IndexHandler,
 )
-from filelore.search_query import parse_search_query
 from filelore.search import (
     AudioFileQueryVectorizer,
     ImageFileQueryVectorizer,
+    SEGMENT_GROUP_OVERFETCH_FACTOR,
+    SearchRequest,
+    SearchService,
     SearchSource,
+    group_segment_results,
+    parse_search_query,
 )
 from filelore.tui import (
-    AUDIO_OVERFETCH_FACTOR,
     FileLoreSearchApp,
     QueryHelpScreen,
     SearchResultCard,
-    SearchSession,
-    group_audio_results,
 )
 
 
@@ -241,13 +242,13 @@ def audio_result(
 def image_session(
     repository: RecordingSearchRepository,
     created: list[RecordingImageEmbedding],
-) -> SearchSession:
+) -> SearchService:
     def factory() -> RecordingImageEmbedding:
         embedding = RecordingImageEmbedding()
         created.append(embedding)
         return embedding
 
-    return SearchSession(
+    return SearchService(
         repository,  # type: ignore[arg-type]
         {"image": handler("image", factory)},
         ("image",),
@@ -412,7 +413,7 @@ def test_session_switches_models_only_when_a_new_target_is_searched(
         audios.append(RecordingAudioEmbedding())
         return audios[-1]
 
-    session = SearchSession(
+    session = SearchService(
         repository,  # type: ignore[arg-type]
         {
             "image": handler("image", image_factory),
@@ -425,15 +426,19 @@ def test_session_switches_models_only_when_a_new_target_is_searched(
     orange = parse_search_query("orange cat")
     blue = parse_search_query("blue dog")
     session.search(
-        SearchSource.from_text(orange.semantic_query),
-        orange.metadata_query,
-        "image",
+        SearchRequest(
+            SearchSource.from_text(orange.semantic_query),
+            "image",
+            orange.metadata_query,
+        ),
         10,
     )
     session.search(
-        SearchSource.from_text(blue.semantic_query),
-        blue.metadata_query,
-        "image",
+        SearchRequest(
+            SearchSource.from_text(blue.semantic_query),
+            "image",
+            blue.metadata_query,
+        ),
         10,
     )
     assert len(images) == 1 and images[0].close_count == 0
@@ -441,9 +446,11 @@ def test_session_switches_models_only_when_a_new_target_is_searched(
 
     glass = parse_search_query("glass breaking")
     session.search(
-        SearchSource.from_text(glass.semantic_query),
-        glass.metadata_query,
-        "audio",
+        SearchRequest(
+            SearchSource.from_text(glass.semantic_query),
+            "audio",
+            glass.metadata_query,
+        ),
         10,
     )
     assert images[0].close_count == 1
@@ -480,11 +487,11 @@ def test_audio_results_group_by_file_and_sort_chunks_by_similarity(
         ),
     )
 
-    grouped = group_audio_results(results, limit=1)
+    grouped = group_segment_results(results, limit=1)
 
     assert len(grouped) == 1
     assert grouped[0].result.file.id == "crash"
-    assert [chunk.score for chunk in grouped[0].chunks] == [0.9, 0.6]
+    assert [chunk.score for chunk in grouped[0].matches] == [0.9, 0.6]
 
 
 @pytest.mark.anyio
@@ -514,7 +521,7 @@ async def test_tui_audio_search_uses_filters_overfetches_and_groups_chunks(
         audios.append(RecordingAudioEmbedding())
         return audios[-1]
 
-    session = SearchSession(
+    session = SearchService(
         repository,  # type: ignore[arg-type]
         {"audio": handler("audio", factory)},
         ("audio",),
@@ -531,7 +538,9 @@ async def test_tui_audio_search_uses_filters_overfetches_and_groups_chunks(
         assert len(audios) == 1
         assert audios[0].texts == ["glass breaking"]
         assert repository.calls[0]["scope"] == "segment"
-        assert repository.calls[0]["limit"] == 10 * AUDIO_OVERFETCH_FACTOR
+        assert repository.calls[0]["limit"] == (
+            10 * SEGMENT_GROUP_OVERFETCH_FACTOR
+        )
         assert repository.calls[0]["metadata_filter"] is not None
         assert len(app.query(SearchResultCard)) == 1
         assert len(app.query(Collapsible)) == 1
@@ -574,7 +583,7 @@ async def test_tui_searches_for_audio_similar_to_a_file(
         audios.append(RecordingAudioEmbedding())
         return audios[-1]
 
-    session = SearchSession(
+    session = SearchService(
         repository,  # type: ignore[arg-type]
         {"audio": handler("audio", factory)},
         ("audio",),
@@ -596,7 +605,9 @@ async def test_tui_searches_for_audio_similar_to_a_file(
         assert audios[0].texts == []
         assert len(audios[0].audio_inputs) == 1
         assert repository.calls[0]["scope"] == "segment"
-        assert repository.calls[0]["limit"] == 10 * AUDIO_OVERFETCH_FACTOR
+        assert repository.calls[0]["limit"] == (
+            10 * SEGMENT_GROUP_OVERFETCH_FACTOR
+        )
         assert len(app.query(SearchResultCard)) == 1
         assert "grouped 2 audio chunks into 1 file" in str(
             app.query_one("#status", Static).content
@@ -606,7 +617,7 @@ async def test_tui_searches_for_audio_similar_to_a_file(
 @pytest.mark.anyio
 async def test_tui_help_tracks_selected_target(tmp_path: Path) -> None:
     repository = RecordingSearchRepository()
-    session = SearchSession(
+    session = SearchService(
         repository,  # type: ignore[arg-type]
         {
             "image": handler("image", RecordingImageEmbedding),

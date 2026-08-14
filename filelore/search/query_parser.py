@@ -1,4 +1,4 @@
-"""Parse the compact filter syntax used by interactive semantic search."""
+"""Parse compact semantic text and ``key:value`` metadata filters."""
 
 from __future__ import annotations
 
@@ -45,45 +45,12 @@ class ParsedSearchFilters:
     filters: tuple[tuple[str, str], ...] = ()
 
 
-def _split_search_tokens(
-    value: str,
-) -> tuple[list[str], dict[str, str], list[tuple[str, str]]]:
-    try:
-        tokens = shlex.split(value)
-    except ValueError as error:
-        raise ValueError(f"Invalid query quoting: {error}") from error
-
-    semantic_tokens: list[str] = []
-    filter_values: dict[str, str] = {}
-    filters: list[tuple[str, str]] = []
-    for token in tokens:
-        match = _FILTER_TOKEN.match(token)
-        if match is None:
-            semantic_tokens.append(token)
-            continue
-
-        key = match.group("key").casefold()
-        raw_value = match.group("value").strip()
-        if key not in _FILTER_KEYS:
-            raise ValueError(f"Unknown filter: {key}")
-        if not raw_value:
-            raise ValueError(f"Filter '{key}' requires a value")
-        if key in filter_values:
-            raise ValueError(f"Filter '{key}' may only be used once")
-        filter_values[key] = raw_value
-        filters.append((key, raw_value))
-
-    return semantic_tokens, filter_values, filters
-
-
 def parse_search_query(value: str) -> ParsedSearchQuery:
-    """Split semantic text from supported ``key:value`` metadata filters."""
+    """Split semantic text from supported metadata filter tokens."""
     semantic_tokens, filter_values, filters = _split_search_tokens(value)
-
     semantic_query = " ".join(semantic_tokens).strip()
     if not semantic_query:
         raise ValueError("Semantic search text is required")
-
     return ParsedSearchQuery(
         semantic_query=semantic_query,
         metadata_query=_metadata_query(filter_values),
@@ -102,92 +69,21 @@ def parse_search_filters(value: str) -> ParsedSearchFilters:
     )
 
 
-def _metadata_query(filter_values: dict[str, str]) -> FileMetadataQuery:
-    """Validate parsed values and build the repository metadata query."""
-
-    min_width, min_height = _parse_resolution_filter(
-        filter_values.get("min-res"), "min-res"
-    )
-    max_width, max_height = _parse_resolution_filter(
-        filter_values.get("max-res"), "max-res"
-    )
-    if (
-        min_width is not None
-        and min_height is not None
-        and max_width is not None
-        and max_height is not None
-        and (min_width > max_width or min_height > max_height)
-    ):
-        raise ValueError("min-res cannot exceed max-res")
-
-    modified_after = _parse_date_boundary(filter_values.get("after"), "after")
-    modified_before = _parse_date_boundary(
-        filter_values.get("before"), "before"
-    )
-    if (
-        modified_after is not None
-        and modified_before is not None
-        and modified_after >= modified_before
-    ):
-        raise ValueError("after must be earlier than before")
-
-    sample_rate = _parse_positive_int_filter(
-        filter_values.get("sample-rate"), "sample-rate"
-    )
-    bitrate = _parse_positive_int_filter(
-        filter_values.get("bitrate"), "bitrate"
-    )
-    longer_than = _parse_duration_filter(
-        filter_values.get("longer-than"),
-        "longer-than",
-        allow_zero=True,
-    )
-    shorter_than = _parse_duration_filter(
-        filter_values.get("shorter-than"),
-        "shorter-than",
-        allow_zero=False,
-    )
-    if (
-        longer_than is not None
-        and shorter_than is not None
-        and longer_than >= shorter_than
-    ):
-        raise ValueError("longer-than must be less than shorter-than")
-
-    return FileMetadataQuery(
-        name_contains=filter_values.get("name"),
-        file_format=filter_values.get("format"),
-        min_width=min_width,
-        min_height=min_height,
-        max_width=max_width,
-        max_height=max_height,
-        sample_rate_hz=sample_rate,
-        bitrate_bps=bitrate,
-        duration_longer_than=longer_than,
-        duration_shorter_than=shorter_than,
-        modified_after=modified_after,
-        modified_before=modified_before,
-    )
-
-
-def validate_search_target(
-    parsed_query: ParsedSearchQuery,
-    target: str,
-) -> None:
+def validate_search_target(parsed_query: ParsedSearchQuery, target: str) -> None:
     """Reject metadata filters incompatible with the selected file type."""
     validate_search_metadata(parsed_query.metadata_query, target)
 
 
-def validate_search_metadata(
-    query: FileMetadataQuery,
-    target: str,
-) -> None:
+def validate_search_metadata(query: FileMetadataQuery, target: str) -> None:
     """Reject metadata filters incompatible with the selected file type."""
-    if target == "audio" and (
-        query.min_width is not None
-        or query.min_height is not None
-        or query.max_width is not None
-        or query.max_height is not None
+    if target == "audio" and any(
+        value is not None
+        for value in (
+            query.min_width,
+            query.min_height,
+            query.max_width,
+            query.max_height,
+        )
     ):
         raise ValueError("Resolution filters require the image target")
     if target == "image" and any(
@@ -220,6 +116,89 @@ def target_for_format(file_format: str) -> str | None:
         if extension in extensions
     )
     return matches[0] if len(matches) == 1 else None
+
+
+def _split_search_tokens(
+    value: str,
+) -> tuple[list[str], dict[str, str], list[tuple[str, str]]]:
+    try:
+        tokens = shlex.split(value)
+    except ValueError as error:
+        raise ValueError(f"Invalid query quoting: {error}") from error
+    semantic_tokens: list[str] = []
+    filter_values: dict[str, str] = {}
+    filters: list[tuple[str, str]] = []
+    for token in tokens:
+        match = _FILTER_TOKEN.match(token)
+        if match is None:
+            semantic_tokens.append(token)
+            continue
+        key = match.group("key").casefold()
+        raw_value = match.group("value").strip()
+        if key not in _FILTER_KEYS:
+            raise ValueError(f"Unknown filter: {key}")
+        if not raw_value:
+            raise ValueError(f"Filter '{key}' requires a value")
+        if key in filter_values:
+            raise ValueError(f"Filter '{key}' may only be used once")
+        filter_values[key] = raw_value
+        filters.append((key, raw_value))
+    return semantic_tokens, filter_values, filters
+
+
+def _metadata_query(filter_values: dict[str, str]) -> FileMetadataQuery:
+    min_width, min_height = _parse_resolution_filter(
+        filter_values.get("min-res"), "min-res"
+    )
+    max_width, max_height = _parse_resolution_filter(
+        filter_values.get("max-res"), "max-res"
+    )
+    if (
+        min_width is not None
+        and min_height is not None
+        and max_width is not None
+        and max_height is not None
+        and (min_width > max_width or min_height > max_height)
+    ):
+        raise ValueError("min-res cannot exceed max-res")
+    modified_after = _parse_date_boundary(filter_values.get("after"), "after")
+    modified_before = _parse_date_boundary(filter_values.get("before"), "before")
+    if (
+        modified_after is not None
+        and modified_before is not None
+        and modified_after >= modified_before
+    ):
+        raise ValueError("after must be earlier than before")
+    longer_than = _parse_duration_filter(
+        filter_values.get("longer-than"), "longer-than", allow_zero=True
+    )
+    shorter_than = _parse_duration_filter(
+        filter_values.get("shorter-than"), "shorter-than", allow_zero=False
+    )
+    if (
+        longer_than is not None
+        and shorter_than is not None
+        and longer_than >= shorter_than
+    ):
+        raise ValueError("longer-than must be less than shorter-than")
+    return FileMetadataQuery(
+        name_contains=filter_values.get("name"),
+        file_format=filter_values.get("format"),
+        min_width=min_width,
+        min_height=min_height,
+        max_width=max_width,
+        max_height=max_height,
+        sample_rate_hz=_parse_positive_int_filter(
+            filter_values.get("sample-rate"), "sample-rate"
+        ),
+        bitrate_bps=_parse_positive_int_filter(
+            filter_values.get("bitrate"), "bitrate"
+        ),
+        duration_longer_than=longer_than,
+        duration_shorter_than=shorter_than,
+        modified_after=modified_after,
+        modified_before=modified_before,
+    )
 
 
 def _parse_resolution_filter(

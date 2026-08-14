@@ -1,90 +1,18 @@
-"""Shared contracts and functions for text and file similarity search."""
+"""Low-level query embedding, vector search, and result grouping."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Collection, Literal, Protocol, Sequence
+from typing import Any, Collection, Literal, Sequence
 
-from filelore.embedding import (
-    BaseEmbedding,
-    EmbeddingVector,
-    TextEmbedding,
-)
+from filelore.embedding import BaseEmbedding, EmbeddingVector, TextEmbedding
 from filelore.index import FileSearchResult
+from filelore.search.models import SearchResultGroup, SearchSource
+from filelore.search.protocols import FileQueryVectorizer, SearchRepository
 from filelore.storage import MetadataFilter
 
 
 VectorScope = Literal["file", "segment"]
-
-
-@dataclass(frozen=True, slots=True)
-class SearchSource:
-    """Exactly one semantic input used to create comparable query vectors."""
-
-    text: str | None = None
-    file: Path | None = None
-
-    def __post_init__(self) -> None:
-        has_text = self.text is not None
-        has_file = self.file is not None
-        if has_text == has_file:
-            raise ValueError("Search source requires exactly one of text or file")
-        if self.text is not None and not self.text.strip():
-            raise ValueError("Search text must not be empty")
-
-    @classmethod
-    def from_text(cls, value: str) -> SearchSource:
-        return cls(text=value.strip())
-
-    @classmethod
-    def from_file(cls, value: str | Path) -> SearchSource:
-        return cls(file=Path(value).expanduser())
-
-    @property
-    def is_file(self) -> bool:
-        return self.file is not None
-
-    @property
-    def display_value(self) -> str:
-        if self.text is not None:
-            return self.text
-        assert self.file is not None
-        return self.file.name
-
-
-class FileQueryVectorizer(Protocol):
-    """Convert one supported query file into one or more search vectors."""
-
-    supported_extensions: Collection[str]
-
-    def predict_file(
-        self,
-        path: Path,
-        embedding: BaseEmbedding[Any],
-    ) -> tuple[EmbeddingVector, ...]: ...
-
-
-class SearchRepository(Protocol):
-    """Repository operations required by the shared search function."""
-
-    def semantic_search(
-        self,
-        vector: Sequence[float],
-        *,
-        vector_name: str,
-        limit: int,
-        metadata_filter: MetadataFilter | None,
-    ) -> tuple[FileSearchResult, ...]: ...
-
-    def semantic_segment_search(
-        self,
-        vector: Sequence[float],
-        *,
-        vector_name: str,
-        limit: int,
-        metadata_filter: MetadataFilter | None,
-    ) -> tuple[FileSearchResult, ...]: ...
 
 
 def validate_query_file(
@@ -173,3 +101,21 @@ def search_vectors(
             :limit
         ]
     )
+
+
+def group_segment_results(
+    results: Sequence[FileSearchResult],
+    *,
+    limit: int,
+) -> tuple[SearchResultGroup, ...]:
+    """Group segment matches by parent file and retain best-first matches."""
+    groups: dict[str, list[FileSearchResult]] = {}
+    for result in results:
+        groups.setdefault(result.file.id, []).append(result)
+
+    entities: list[SearchResultGroup] = []
+    for matches in groups.values():
+        ranked = tuple(sorted(matches, key=lambda item: item.score, reverse=True))
+        entities.append(SearchResultGroup(result=ranked[0], matches=ranked))
+    entities.sort(key=lambda item: item.result.score, reverse=True)
+    return tuple(entities[:limit])

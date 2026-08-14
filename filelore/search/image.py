@@ -7,7 +7,7 @@ from typing import Any
 
 from filelore.embedding import BaseEmbedding, EmbeddingVector, ImageEmbedding
 from filelore.metadata import ImageMetadataParser
-from filelore.search.core import validate_query_file
+from filelore.search.execution import validate_query_file
 
 
 class ImageFileQueryVectorizer:

@@ -5,7 +5,7 @@ from datetime import datetime
 import pytest
 
 from filelore.index import FileMetadataQuery, file_metadata_filter
-from filelore.search_query import (
+from filelore.search import (
     parse_search_filters,
     parse_search_query,
     validate_search_target,

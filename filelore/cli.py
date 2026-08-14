@@ -7,9 +7,7 @@ import os
 import sys
 from contextlib import ExitStack
 from dataclasses import dataclass
-from datetime import date, datetime, time
 from pathlib import Path
-from time import perf_counter
 from typing import Any, Callable, Mapping, Sequence
 
 from filelore.cli_display import CliDisplay
@@ -23,23 +21,19 @@ from filelore.embedding import (
 from filelore.index import (
     FileIndexRepository,
     FileIndexer,
-    FileMetadataQuery,
     IndexCoordinator,
     IndexHandler,
     IndexWorkQueue,
-    file_metadata_filter,
     normalized_path,
 )
 from filelore.metadata import AudioMetadataParser, ImageMetadataParser
 from filelore.processors import AudioProcessor, ImageProcessor
 from filelore.search import (
-    AudioFileQueryVectorizer,
     FileQueryVectorizer,
-    ImageFileQueryVectorizer,
-    SearchSource,
-    embed_search_source,
-    search_vectors,
-    validate_query_file,
+    SearchRequest,
+    SearchService,
+    build_structured_search_request,
+    default_file_query_vectorizers,
 )
 from filelore.storage import QdrantVectorDatabase, VectorDatabase
 
@@ -253,14 +247,12 @@ def main(
         audio=audio_embedding_factory,
     )
     index_handlers = _index_handlers(embedding_factories)
-    file_query_vectorizers = _file_query_vectorizers()
+    file_query_vectorizers = default_file_query_vectorizers()
     handlers_by_type = {
         handler.file_type: handler for handler in index_handlers
     }
-    search_target: str | None = None
-    semantic_query = (args.query or "").strip()
     query_file: Path | None = args.query_file
-    search_source: SearchSource | None = None
+    search_request: SearchRequest | None = None
     interactive_terminal = _is_interactive_terminal()
     interactive_mode = args.interactive or (
         not raw_argv and interactive_terminal
@@ -314,7 +306,6 @@ def main(
         if result_limit < 1:
             display.print_error("Search limit must be positive")
             return 2
-        metadata_query = None
     elif args.index_directory is not None:
         if args.query is not None:
             display.print_error("Search query cannot be combined with --index")
@@ -352,7 +343,6 @@ def main(
                 f"Directory does not exist: {args.index_directory}"
             )
             return 2
-        metadata_query = None
     else:
         if (
             args.no_recursive
@@ -362,16 +352,6 @@ def main(
         ):
             display.print_error("Index options require --index")
             return 2
-        if args.query is not None and query_file is not None:
-            display.print_error(
-                "A text query cannot be combined with --query-file"
-            )
-            return 2
-        if not semantic_query and query_file is None:
-            display.print_error(
-                "A text query or --query-file is required unless --index is used"
-            )
-            return 2
         result_limit = (
             args.limit if args.limit is not None else DEFAULT_RESULT_LIMIT
         )
@@ -379,28 +359,22 @@ def main(
             display.print_error("Search limit must be positive")
             return 2
         try:
-            metadata_query = _metadata_query(args)
-            search_target = _resolve_search_target(
-                args.target,
-                args.file_format,
-                query_file,
+            search_request = build_structured_search_request(
+                text=args.query,
+                query_file=query_file,
+                explicit_target=args.target,
+                file_query_vectorizers=file_query_vectorizers,
+                name_contains=args.name_contains,
+                file_format=args.file_format,
+                min_resolution=args.min_resolution,
+                max_resolution=args.max_resolution,
+                sample_rate_hz=args.sample_rate,
+                bitrate_bps=args.bitrate,
+                duration_longer_than=args.longer_than,
+                duration_shorter_than=args.shorter_than,
+                modified_after=args.modified_after,
+                modified_before=args.modified_before,
             )
-            _validate_target_filters(args, search_target)
-            if query_file is not None:
-                vectorizer = file_query_vectorizers.get(search_target)
-                if vectorizer is None:
-                    raise ValueError(
-                        "File similarity search is not enabled for "
-                        f"{search_target}"
-                    )
-                search_source = SearchSource.from_file(
-                    validate_query_file(
-                        query_file,
-                        vectorizer.supported_extensions,
-                    )
-                )
-            else:
-                search_source = SearchSource.from_text(semantic_query)
         except ValueError as error:
             display.print_error(f"Invalid search: {error}")
             return 2
@@ -439,17 +413,14 @@ def main(
                     allowed_targets,
                     result_limit,
                 )
-            assert metadata_query is not None
-            assert search_target is not None
-            assert search_source is not None
+            assert search_request is not None
             return _search(
                 file_index,
-                search_source,
-                metadata_query,
+                search_request,
                 result_limit,
-                handlers_by_type[search_target],
+                handlers_by_type,
+                file_query_vectorizers,
                 display,
-                file_vectorizer=file_query_vectorizers.get(search_target),
             )
     except (EOFError, KeyboardInterrupt):
         display.print_error()
@@ -471,80 +442,6 @@ def _embedding_factories(
         "image": image or ClipImageEmbedding,
         "audio": audio or ClapAudioEmbedding,
     }
-
-
-def _resolve_search_target(
-    explicit_target: str | None,
-    file_format: str | None,
-    query_file: Path | None = None,
-) -> str:
-    inferred_target = _target_for_format(file_format) if file_format else None
-    if (
-        explicit_target is not None
-        and inferred_target is not None
-        and explicit_target != inferred_target
-    ):
-        raise ValueError(
-            f"Format {file_format!r} is {inferred_target}, not {explicit_target}"
-        )
-    if explicit_target is not None:
-        selected_target = explicit_target
-    elif inferred_target is not None:
-        selected_target = inferred_target
-    else:
-        selected_target = None
-
-    query_target = (
-        _target_for_format(query_file.suffix) if query_file is not None else None
-    )
-    if query_file is not None and query_target is None:
-        extension = query_file.suffix or "<none>"
-        raise ValueError(f"Unsupported query file extension: {extension}")
-    if (
-        selected_target is not None
-        and query_target is not None
-        and selected_target != query_target
-    ):
-        raise ValueError(
-            f"Query file is {query_target}, not {selected_target}"
-        )
-    if selected_target is not None:
-        return selected_target
-    if query_target is not None:
-        return query_target
-    raise ValueError(
-        "Search file type is required; use --target image or --target audio"
-    )
-
-
-def _target_for_format(file_format: str) -> str | None:
-    extension = f".{file_format.strip().removeprefix('.').casefold()}"
-    matches = tuple(
-        file_type
-        for file_type, extensions in (
-            ("image", ImageMetadataParser.supported_extensions),
-            ("audio", AudioMetadataParser.supported_extensions),
-        )
-        if extension in extensions
-    )
-    return matches[0] if len(matches) == 1 else None
-
-
-def _validate_target_filters(args: argparse.Namespace, target: str) -> None:
-    if target == "audio" and (
-        args.min_resolution is not None or args.max_resolution is not None
-    ):
-        raise ValueError("Resolution filters require the image target")
-    if target == "image" and any(
-        value is not None
-        for value in (
-            args.sample_rate,
-            args.bitrate,
-            args.longer_than,
-            args.shorter_than,
-        )
-    ):
-        raise ValueError("Audio metadata filters require the audio target")
 
 
 def _is_interactive_terminal() -> bool:
@@ -598,14 +495,6 @@ def _index_handlers(
             vector_scope="segment",
         ),
     )
-
-
-def _file_query_vectorizers() -> dict[str, FileQueryVectorizer]:
-    """Return file-query adapters enabled for each search target."""
-    return {
-        "image": ImageFileQueryVectorizer(),
-        "audio": AudioFileQueryVectorizer(),
-    }
 
 
 def _image_processor_for(
@@ -771,116 +660,36 @@ def _index_queue(
     return IndexQueueOutcome(added=added, updated=updated, failed=failed)
 
 
-def _metadata_query(args: argparse.Namespace) -> FileMetadataQuery:
-    min_width, min_height = _parse_resolution(
-        args.min_resolution or "", "minimum"
-    )
-    max_width, max_height = _parse_resolution(
-        args.max_resolution or "", "maximum"
-    )
-    modified_after = _parse_datetime(
-        args.modified_after or "",
-        end_of_day=False,
-    )
-    modified_before = _parse_datetime(
-        args.modified_before or "",
-        end_of_day=True,
-    )
-    if (
-        min_width is not None
-        and min_height is not None
-        and max_width is not None
-        and max_height is not None
-        and (min_width > max_width or min_height > max_height)
-    ):
-        raise ValueError("minimum resolution cannot exceed maximum resolution")
-    if (
-        modified_after is not None
-        and modified_before is not None
-        and modified_after > modified_before
-    ):
-        raise ValueError("modified-after cannot be later than modified-before")
-    if args.sample_rate is not None and args.sample_rate < 1:
-        raise ValueError("sample rate must be positive")
-    if args.bitrate is not None and args.bitrate < 1:
-        raise ValueError("bitrate must be positive")
-    if args.longer_than is not None and args.longer_than < 0:
-        raise ValueError("longer-than duration must be non-negative")
-    if args.shorter_than is not None and args.shorter_than <= 0:
-        raise ValueError("shorter-than duration must be positive")
-    if (
-        args.longer_than is not None
-        and args.shorter_than is not None
-        and args.longer_than >= args.shorter_than
-    ):
-        raise ValueError("longer-than duration must be less than shorter-than")
-
-    return FileMetadataQuery(
-        name_contains=args.name_contains,
-        file_format=args.file_format,
-        min_width=min_width,
-        min_height=min_height,
-        max_width=max_width,
-        max_height=max_height,
-        sample_rate_hz=args.sample_rate,
-        bitrate_bps=args.bitrate,
-        duration_longer_than=args.longer_than,
-        duration_shorter_than=args.shorter_than,
-        modified_after=modified_after,
-        modified_before=modified_before,
-    )
-
-
 def _search(
     file_index: FileIndexRepository,
-    source: SearchSource,
-    metadata_query: FileMetadataQuery,
+    request: SearchRequest,
     limit: int,
-    handler: IndexHandler,
+    handlers: Mapping[str, IndexHandler],
+    file_query_vectorizers: Mapping[str, FileQueryVectorizer],
     display: CliDisplay,
-    *,
-    file_vectorizer: FileQueryVectorizer | None = None,
 ) -> int:
-    total_started = perf_counter()
+    def show_stage(message: str) -> None:
+        if message.startswith("Initializing"):
+            display.print_info(message)
 
-    initialization_started = perf_counter()
-    with display.status(f"Initializing {handler.file_type} model…"):
-        embedding = handler.embedding_factory()
-    initialization_ms = (perf_counter() - initialization_started) * 1000
-
-    try:
-        embedding_started = perf_counter()
-        query_vectors = embed_search_source(
-            source,
-            embedding,
-            file_vectorizer=file_vectorizer,
-        )
-        embedding_ms = (perf_counter() - embedding_started) * 1000
-
-        fetch_started = perf_counter()
-        results = search_vectors(
-            file_index,
-            query_vectors,
-            vector_name=embedding.vector_name,
-            vector_scope=handler.vector_scope,
-            limit=limit,
-            metadata_filter=file_metadata_filter(metadata_query),
-        )
-        fetch_ms = (perf_counter() - fetch_started) * 1000
-        total_ms = (perf_counter() - total_started) * 1000
-    finally:
-        embedding.close()
+    with SearchService(
+        file_index,
+        handlers,
+        (request.target,),
+        file_query_vectorizers=file_query_vectorizers,
+    ) as search:
+        response = search.search(request, limit, on_stage=show_stage)
 
     display.print_search_results(
-        results,
-        query=source.display_value,
-        query_is_file=source.is_file,
+        tuple(item.result for item in response.results),
+        query=request.source.display_value,
+        query_is_file=request.source.is_file,
         limit=limit,
         timings=(
-            ("model", _format_duration(initialization_ms)),
-            ("embedding", _format_duration(embedding_ms)),
-            ("search", _format_duration(fetch_ms)),
-            ("total", _format_duration(total_ms)),
+            ("model", _format_duration(response.timings.initialization_ms)),
+            ("embedding", _format_duration(response.timings.embedding_ms)),
+            ("search", _format_duration(response.timings.fetch_ms)),
+            ("total", _format_duration(response.timings.total_ms)),
         ),
     )
     return 0
@@ -890,37 +699,3 @@ def _format_duration(duration_ms: float) -> str:
     if duration_ms >= 1000:
         return f"{duration_ms / 1000:.2f} s"
     return f"{duration_ms:.2f} ms"
-
-
-def _parse_resolution(value: str, label: str) -> tuple[int | None, int | None]:
-    normalized = value.strip().casefold().replace("×", "x")
-    if not normalized:
-        return None, None
-    try:
-        width_text, height_text = normalized.split("x", maxsplit=1)
-        width, height = int(width_text), int(height_text)
-    except ValueError as error:
-        raise ValueError(
-            f"Invalid {label} resolution; expected WIDTHxHEIGHT"
-        ) from error
-    if width < 1 or height < 1:
-        raise ValueError(f"Invalid {label} resolution; values must be positive")
-    return width, height
-
-
-def _parse_datetime(value: str, *, end_of_day: bool) -> datetime | None:
-    normalized = value.strip()
-    if not normalized:
-        return None
-    try:
-        if len(normalized) == 10:
-            parsed_date = date.fromisoformat(normalized)
-            boundary = time.max if end_of_day else time.min
-            parsed = datetime.combine(parsed_date, boundary)
-        else:
-            parsed = datetime.fromisoformat(normalized)
-    except ValueError as error:
-        raise ValueError(
-            "Invalid datetime; use YYYY-MM-DD or an ISO datetime"
-        ) from error
-    return parsed.astimezone() if parsed.tzinfo is None else parsed
