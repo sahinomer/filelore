@@ -8,13 +8,18 @@ from filelore.documents.models import (
     TextBlockType,
     TextChunk,
 )
-from filelore.documents.parsers import DocumentParser, MarkdownDocumentParser
+from filelore.documents.parsers import (
+    DocumentParser,
+    HtmlDocumentParser,
+    MarkdownDocumentParser,
+)
 from filelore.documents.registry import DocumentParserRegistry
 
 __all__ = [
     "DocumentChunker",
     "DocumentParser",
     "DocumentParserRegistry",
+    "HtmlDocumentParser",
     "MarkdownDocumentParser",
     "ParsedDocument",
     "SourceLocation",
