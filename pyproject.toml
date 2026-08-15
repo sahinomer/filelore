@@ -5,6 +5,7 @@ description = "A local-first file indexing and search experiment"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "markdown-it-py>=4,<5",
     "mutagen>=1.47,<2",
     "numpy>=2,<3",
     "Pillow>=10,<13",
