@@ -12,6 +12,7 @@ from filelore.documents.parsers import (
     DocumentParser,
     HtmlDocumentParser,
     MarkdownDocumentParser,
+    PdfDocumentParser,
 )
 from filelore.documents.registry import DocumentParserRegistry
 
@@ -21,6 +22,7 @@ __all__ = [
     "DocumentParserRegistry",
     "HtmlDocumentParser",
     "MarkdownDocumentParser",
+    "PdfDocumentParser",
     "ParsedDocument",
     "SourceLocation",
     "TextBlock",

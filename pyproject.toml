@@ -10,6 +10,7 @@ dependencies = [
     "mutagen>=1.47,<2",
     "numpy>=2,<3",
     "Pillow>=10,<13",
+    "pypdf>=6.14,<7",
     "qdrant-client>=1.18,<2",
     "rich>=14,<15",
     "soundfile>=0.13,<1",
@@ -26,7 +27,10 @@ embedding = [
 
 [dependency-groups]
 profiling = ["psutil>=6,<8"]
-test = ["pytest>=8,<10"]
+test = [
+    "pytest>=8,<10",
+    "reportlab>=5,<6",
+]
 
 [tool.uv]
 package = false
