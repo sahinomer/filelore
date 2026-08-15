@@ -27,7 +27,7 @@ def document_metadata(path: Path) -> DocumentMetadata:
         modified_at=datetime(2026, 8, 15, tzinfo=timezone.utc),
         document_format=DocumentFormat.MARKDOWN,
         title="Türkçe belge",
-        authors=("Şahin",),
+        authors=("Örnek Yazar",),
         language="tr",
         properties={"description": "Çok dilli içerik 日本語 العربية"},
     )

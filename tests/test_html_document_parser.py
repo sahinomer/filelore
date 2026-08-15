@@ -19,8 +19,8 @@ def test_html_parser_extracts_structure_metadata_and_unicode(
 <head>
   <meta charset="utf-8">
   <title>Çok Dilli Belge</title>
-  <meta name="author" content="Şahin">
-  <meta property="article:author" content="Ayşe">
+  <meta name="author" content="Birinci Örnek Yazar">
+  <meta property="article:author" content="İkinci Örnek Yazar">
   <meta name="description" content="Türkçe açıklama">
   <meta name="keywords" content="arama, İstanbul, 日本語">
   <meta name="created" content="2026-08-14T10:30:00+03:00">
@@ -55,7 +55,10 @@ def test_html_parser_extracts_structure_metadata_and_unicode(
     assert document.metadata.extension == ".html"
     assert document.metadata.mime_type == "text/html"
     assert document.metadata.title == "Çok Dilli Belge"
-    assert document.metadata.authors == ("Şahin", "Ayşe")
+    assert document.metadata.authors == (
+        "Birinci Örnek Yazar",
+        "İkinci Örnek Yazar",
+    )
     assert document.metadata.language == "tr-TR"
     assert document.metadata.created_at == datetime(
         2026, 8, 14, 10, 30, tzinfo=timezone(timedelta(hours=3))
