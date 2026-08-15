@@ -9,6 +9,7 @@ from filelore.documents.models import (
     TextChunk,
 )
 from filelore.documents.parsers import (
+    DocxDocumentParser,
     DocumentParser,
     HtmlDocumentParser,
     MarkdownDocumentParser,
@@ -18,6 +19,7 @@ from filelore.documents.registry import DocumentParserRegistry
 
 __all__ = [
     "DocumentChunker",
+    "DocxDocumentParser",
     "DocumentParser",
     "DocumentParserRegistry",
     "HtmlDocumentParser",
