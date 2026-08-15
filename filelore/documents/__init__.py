@@ -1,6 +1,11 @@
 """Format-neutral document parsing and chunking abstractions."""
 
-from filelore.documents.chunking import DocumentChunker
+from filelore.documents.chunking import (
+    DocumentChunker,
+    ParagraphChunker,
+    SentenceSplitter,
+    UnicodeSentenceSplitter,
+)
 from filelore.documents.models import (
     ParsedDocument,
     SourceLocation,
@@ -24,10 +29,13 @@ __all__ = [
     "DocumentParserRegistry",
     "HtmlDocumentParser",
     "MarkdownDocumentParser",
+    "ParagraphChunker",
     "PdfDocumentParser",
     "ParsedDocument",
+    "SentenceSplitter",
     "SourceLocation",
     "TextBlock",
     "TextBlockType",
     "TextChunk",
+    "UnicodeSentenceSplitter",
 ]

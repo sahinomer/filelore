@@ -10,6 +10,9 @@ __pycache__/
 .cache/
 *.egg-info/
 
+# Clone-local development tools
+/tools.local/
+
 # IDE
 .idea/
 

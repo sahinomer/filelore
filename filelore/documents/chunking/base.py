@@ -11,3 +11,9 @@ class DocumentChunker(Protocol):
     """Split a parsed document without depending on its original format."""
 
     def chunks(self, document: ParsedDocument) -> tuple[TextChunk, ...]: ...
+
+
+class SentenceSplitter(Protocol):
+    """Split prose at natural sentence boundaries."""
+
+    def split(self, text: str) -> tuple[str, ...]: ...
