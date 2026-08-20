@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from typing import Any, Sequence
 
 from filelore.embedding.base import EmbeddingVector
-from filelore.embedding.text import TextEmbedding
+from filelore.embedding.document.base import DocumentEmbedding
 
 
 def _load_sentence_transformer_backend(
@@ -43,7 +43,7 @@ def _model_vector_name(model_id: str) -> str:
     return f"text_sentence_transformer_{normalized}"
 
 
-class SentenceTransformerTextEmbedding(TextEmbedding[str]):
+class SentenceTransformerTextEmbedding(DocumentEmbedding):
     """Embed documents and queries with a configurable Sentence Transformer."""
 
     def __init__(

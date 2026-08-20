@@ -10,6 +10,7 @@ from filelore.embedding.document import (
     DEFAULT_HARRIER_MODEL,
     DEFAULT_HARRIER_QUERY_PROMPT,
     DEFAULT_HARRIER_VECTOR_NAME,
+    DocumentEmbedding,
     HarrierTextEmbedding,
     SentenceTransformerTextEmbedding,
 )
@@ -29,6 +30,7 @@ __all__ = [
     "DEFAULT_HARRIER_MODEL",
     "DEFAULT_HARRIER_QUERY_PROMPT",
     "DEFAULT_HARRIER_VECTOR_NAME",
+    "DocumentEmbedding",
     "EmbeddingVector",
     "HarrierTextEmbedding",
     "ImageEmbedding",

@@ -226,10 +226,18 @@ class FileIndexRepository:
                 "record_type": "segment",
                 "parent_id": parent_record.id,
                 "segment_index": segment.index,
-                "segment_start_seconds": segment.start_seconds,
-                "segment_end_seconds": segment.end_seconds,
             }
         )
+        if segment.start_seconds is not None:
+            payload["segment_start_seconds"] = segment.start_seconds
+            payload["segment_end_seconds"] = segment.end_seconds
+        conflicting_fields = payload.keys() & segment.payload.keys()
+        if conflicting_fields:
+            raise ValueError(
+                "Segment payload must not replace inherited fields: "
+                + ", ".join(sorted(conflicting_fields))
+            )
+        payload.update(segment.payload)
         return VectorRecord(
             id=file_segment_point_id(path, segment.index),
             payload=payload,
@@ -242,11 +250,20 @@ class FileIndexRepository:
         for segment in segments:
             if segment.index in indexes:
                 raise ValueError("Segment indexes must be unique within a file")
-            if (
-                segment.start_seconds < 0
-                or segment.end_seconds <= segment.start_seconds
-            ):
-                raise ValueError("Segment timestamps must define a positive range")
+            has_start = segment.start_seconds is not None
+            has_end = segment.end_seconds is not None
+            if has_start != has_end:
+                raise ValueError("Segment timestamps must be provided together")
+            if has_start and has_end:
+                assert segment.start_seconds is not None
+                assert segment.end_seconds is not None
+                if (
+                    segment.start_seconds < 0
+                    or segment.end_seconds <= segment.start_seconds
+                ):
+                    raise ValueError(
+                        "Segment timestamps must define a positive range"
+                    )
             if not segment.vectors:
                 raise ValueError("Stored file segments must contain vectors")
             indexes.add(segment.index)

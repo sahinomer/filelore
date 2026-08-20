@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 from filelore.embedding import EmbeddingVector
 from filelore.metadata import BaseMetadata
@@ -15,12 +15,13 @@ MetadataType = TypeVar("MetadataType", bound=BaseMetadata)
 
 @dataclass(frozen=True, slots=True)
 class PreparedSegment:
-    """Timed vectors prepared from one segment of a parent file."""
+    """Vectors and payload prepared from one segment of a parent file."""
 
     index: int
-    start_seconds: float
-    end_seconds: float
+    start_seconds: float | None
+    end_seconds: float | None
     vectors: dict[str, EmbeddingVector]
+    payload: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

@@ -10,6 +10,7 @@ from filelore.embedding import (
     DEFAULT_HARRIER_MODEL,
     DEFAULT_HARRIER_QUERY_PROMPT,
     DEFAULT_HARRIER_VECTOR_NAME,
+    DocumentEmbedding,
     HarrierTextEmbedding,
     SentenceTransformerTextEmbedding,
     TextEmbedding,
@@ -136,6 +137,7 @@ def test_sentence_transformer_embeds_documents_and_prompted_queries(
     query_vector = embedding.predict_text("urban transportation")
 
     assert isinstance(embedding, TextEmbedding)
+    assert isinstance(embedding, DocumentEmbedding)
     assert embedding.dimensions == 3
     assert embedding.device == "cpu"
     assert embedding.vector_name == (
