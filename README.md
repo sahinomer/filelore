@@ -12,10 +12,16 @@ and retrieval under the user's control.
 - Combine semantic search with metadata filters.
 - Store indexes locally or in a configured Qdrant service.
 
-The current implementation supports image and audio indexing, text-to-image,
-image-to-image, text-to-audio, and audio-to-audio search through the CLI and
-TUI, raw audio chunk results in the CLI, and grouped expandable audio results
-in the TUI.
+The current implementation supports image, audio, and text-document indexing.
+The CLI and TUI provide text-to-image, image-to-image, text-to-audio,
+audio-to-audio, and text-to-document search. Audio and document content is
+stored as searchable child chunks: the CLI shows raw chunk matches, while the
+TUI groups matching chunks under their source files.
+
+Text documents currently include PDF, HTML, DOCX, PPTX, and Markdown files.
+Extraction preserves available structural context such as pages, slides,
+headings, sections, and source lines. Text handling is Unicode-safe and supports
+multilingual documents and queries.
 
 ## Setup
 
@@ -62,11 +68,12 @@ uv run python -m filelore --index /path/to/files
 ```
 
 FileLore scans directories recursively and stores its local index under
-`~/.filelore/qdrant` by default. Discovery groups images and audio into
-separate queues. It hashes discovered files before loading a model, skips
-unchanged content, and processes only new or changed files. Each non-empty
-queue is confirmed separately, and only one required embedding model is loaded
-at a time. Use `-y` / `--yes` to accept every queue without prompting:
+`~/.filelore/qdrant` by default. Discovery groups images, audio, and text
+documents into separate queues. It hashes discovered files before loading a
+model, skips unchanged content, and processes only new or changed files. Each
+non-empty queue is confirmed separately, and only one required embedding model
+is loaded at a time. Use `-y` / `--yes` to accept every queue without
+prompting:
 
 ```sh
 uv run python -m filelore --index /path/to/files --yes
@@ -76,6 +83,12 @@ Limit indexing to a specific type when desired:
 
 ```sh
 uv run python -m filelore --index /path/to/files --index-type audio
+```
+
+Index only supported text documents:
+
+```sh
+uv run python -m filelore --index /path/to/documents --index-type text
 ```
 
 Repeat `--index-type` to select multiple types. When it is omitted, all
@@ -90,11 +103,12 @@ Open the full-screen search interface by running FileLore without arguments:
 uv run python -m filelore
 ```
 
-`-i` / `--interactive` is the explicit equivalent. Select Image or Audio
-beside the search field. FileLore loads that target's model only when a search
-is submitted, retains it for later searches, and releases it before switching
-to the other target. Supplying `--target image` or `--target audio` when the
-TUI is launched constrains the selector to that target.
+`-i` / `--interactive` is the explicit equivalent. Select Image, Audio, or
+Text beside the search field. FileLore loads that target's model only when a
+search is submitted, retains it for later searches, and releases it before
+switching targets. Supplying `--target image`, `--target audio`, or
+`--target text` when the TUI is launched constrains the selector to that
+target.
 
 Find media similar to a reference image or audio file using any of these
 methods:
@@ -104,9 +118,10 @@ methods:
 - Start typing a path, then press Tab or Right to accept a suggestion.
 - Select Browse or press Ctrl+O to choose a file with the keyboard or mouse.
 
-Autocomplete and Browse follow the selected Image or Audio target. Once chosen,
-the reference appears as an attachment and the same field accepts optional
-result filters:
+Autocomplete and Browse follow the selected Image or Audio target. Text search
+uses a natural-language query rather than a reference document. Once an image
+or audio reference is chosen, it appears as an attachment and the same field
+accepts optional result filters:
 
 ```text
 samples/rain.wav format:wav longer-than:1 shorter-than:30
@@ -126,15 +141,23 @@ Audio queries support `sample-rate`, `bitrate`, `longer-than`, and
 glass breaking format:wav sample-rate:48000 longer-than:1 shorter-than:30
 ```
 
-Both targets support `name`, `format`, `after`, and `before`. Press F1 for
-help tailored to the currently selected target. Date boundaries accept
+Text-document queries search the extracted document chunks. They can use any
+supported document format as a filter:
+
+```text
+regional rail connections format:pdf after:2025
+```
+
+All targets support `name`, `format`, `after`, and `before`. Press F1 for help
+tailored to the currently selected target. Date boundaries accept
 `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or a full ISO datetime. `after` is inclusive
 and `before` is exclusive, so
 `after:2025 before:2026` selects files last modified during 2025.
 
-The default result limit is 20. Audio chunk matches are grouped by parent file
-in the TUI, and each file can be expanded to show its matching chunks ordered
-by similarity.
+The default result limit is 20. Audio and document chunk matches are grouped by
+parent file in the TUI, and each file can be expanded to show its matching
+chunks ordered by similarity. Document results include a text preview and any
+available page, slide, heading, section, or source-line context.
 
 The existing one-shot interface remains available.
 
@@ -167,9 +190,9 @@ Search the index with a natural-language description:
 uv run python -m filelore "a red sports car" --target image
 ```
 
-One-shot search requires `--target image` or `--target audio` so FileLore
-loads only the required model. A recognized `--format` can imply the target,
-so the image target is inferred in this example:
+One-shot search requires `--target image`, `--target audio`, or `--target text`
+so FileLore loads only the required model. A recognized `--format` can imply
+the target, so the image target is inferred in this example:
 
 ```sh
 uv run python -m filelore "a mountain landscape" \
@@ -190,11 +213,30 @@ uv run python -m filelore "glass breaking" \
   --shorter-than 30
 ```
 
+Search text documents by their extracted content:
+
+```sh
+uv run python -m filelore "regional rail connections" --target text
+```
+
+A supported result format can infer the text target:
+
+```sh
+uv run python -m filelore "quarterly sustainability goals" --format pdf
+```
+
+Text indexing uses `microsoft/harrier-oss-v1-270m` by default through
+SentenceTransformers. Document embedding model details are isolated from the
+parser, chunker, and index, so another compatible SentenceTransformer model can
+be configured in code without changing the rest of the text pipeline.
+
 ## Areas of exploration
 
-- Text-document indexing and content search.
+- Semantic and experimental document chunking strategies.
+- Text retrieval benchmarks, profiling, and evaluation.
 - Optional grouping or deduplication for raw CLI audio results.
 - Speech transcription and search.
+- PDF OCR, reranking, and hybrid lexical/vector retrieval.
 
 ## License
 
