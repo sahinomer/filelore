@@ -6,6 +6,13 @@ from filelore.embedding.audio import (
     ClapAudioEmbedding,
 )
 from filelore.embedding.base import BaseEmbedding, EmbeddingVector
+from filelore.embedding.document import (
+    DEFAULT_HARRIER_MODEL,
+    DEFAULT_HARRIER_QUERY_PROMPT,
+    DEFAULT_HARRIER_VECTOR_NAME,
+    HarrierTextEmbedding,
+    SentenceTransformerTextEmbedding,
+)
 from filelore.embedding.image import (
     ClipImageEmbedding,
     ImageEmbedding,
@@ -19,8 +26,13 @@ __all__ = [
     "BaseEmbedding",
     "ClapAudioEmbedding",
     "ClipImageEmbedding",
+    "DEFAULT_HARRIER_MODEL",
+    "DEFAULT_HARRIER_QUERY_PROMPT",
+    "DEFAULT_HARRIER_VECTOR_NAME",
     "EmbeddingVector",
+    "HarrierTextEmbedding",
     "ImageEmbedding",
     "ImageInput",
+    "SentenceTransformerTextEmbedding",
     "TextEmbedding",
 ]
