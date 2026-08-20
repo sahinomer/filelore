@@ -15,6 +15,7 @@ from filelore.embedding import (
     AudioEmbedding,
     AudioInput,
     BaseEmbedding,
+    DocumentEmbedding,
     EmbeddingVector,
     ImageEmbedding,
 )
@@ -155,6 +156,33 @@ class RecordingAudioEmbedding(AudioEmbedding):
         self.close_count += 1
 
 
+class RecordingDocumentEmbedding(DocumentEmbedding):
+    def __init__(self) -> None:
+        super().__init__(
+            model_id="interactive-document-test-model",
+            vector_name="text_interactive_test",
+            dimensions=3,
+        )
+        self.texts: list[str] = []
+        self.close_count = 0
+
+    def predict_batch(
+        self,
+        items: Sequence[str],
+    ) -> tuple[EmbeddingVector, ...]:
+        return tuple((0.0, 0.0, 1.0) for _ in items)
+
+    def predict_text_batch(
+        self,
+        texts: Sequence[str],
+    ) -> tuple[EmbeddingVector, ...]:
+        self.texts.extend(texts)
+        return tuple((0.0, 0.0, 1.0) for _ in texts)
+
+    def close(self) -> None:
+        self.close_count += 1
+
+
 class RecordingSearchRepository:
     def __init__(
         self,
@@ -227,12 +255,17 @@ def file_entry(path: Path, *, file_type: str, entry_id: str) -> FileIndexEntry:
             height=8,
             color_mode="RGB",
         )
-    else:
+    elif file_type == "audio":
         metadata.update(
             audio_format="WAV",
             duration_seconds=18.0,
             sample_rate_hz=48_000,
             bitrate_bps=192_000,
+        )
+    else:
+        metadata.update(
+            document_format="markdown",
+            title="Travel Guide",
         )
     return FileIndexEntry(
         id=entry_id,
@@ -269,6 +302,27 @@ def audio_result(
             index=segment_index,
             start_seconds=segment_index * 8.0,
             end_seconds=(segment_index + 1) * 8.0,
+        ),
+    )
+
+
+def document_result(
+    path: Path,
+    *,
+    segment_index: int,
+    score: float,
+) -> FileSearchResult:
+    return FileSearchResult(
+        file=file_entry(path, file_type="text", entry_id=f"text-{path.name}"),
+        score=score,
+        segment=FileSegmentMatch(
+            index=segment_index,
+            kind="document_chunk",
+            text="Regional trains connect the main cities.",
+            section_path=("Travel Guide", "Rail Travel"),
+            heading="Rail Travel",
+            source_line_start=5,
+            source_line_end=5,
         ),
     )
 
@@ -838,6 +892,59 @@ def test_audio_results_group_by_file_and_sort_chunks_by_similarity(
     assert len(grouped) == 1
     assert grouped[0].result.file.id == "crash"
     assert [chunk.score for chunk in grouped[0].matches] == [0.9, 0.6]
+
+
+@pytest.mark.anyio
+async def test_tui_searches_document_chunks_without_reference_file_controls(
+    tmp_path: Path,
+) -> None:
+    repository = RecordingSearchRepository(
+        segment_results=(
+            document_result(
+                tmp_path / "travel.md",
+                segment_index=1,
+                score=0.9,
+            ),
+        )
+    )
+    documents: list[RecordingDocumentEmbedding] = []
+
+    def factory() -> RecordingDocumentEmbedding:
+        embedding = RecordingDocumentEmbedding()
+        documents.append(embedding)
+        return embedding
+
+    session = SearchService(
+        repository,  # type: ignore[arg-type]
+        {"text": handler("text", factory)},
+        ("text",),
+    )
+    app = FileLoreSearchApp(session, limit=10)
+
+    async with app.run_test(size=(110, 38)) as pilot:
+        query_bar = app.query_one(QueryBar)
+        browse = app.query_one("#browse-query-file", Button)
+        assert query_bar.input.placeholder == "Describe document content..."
+        assert query_bar.input.suggester is None
+        assert browse.disabled
+        assert app._target_options() == (("Text", "text"),)
+
+        query_bar.value = "regional rail connections format:md"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert len(documents) == 1
+        assert documents[0].texts == ["regional rail connections"]
+        assert repository.calls[0]["scope"] == "segment"
+        assert repository.calls[0]["limit"] == (
+            10 * SEGMENT_GROUP_OVERFETCH_FACTOR
+        )
+        assert len(app.query(SearchResultCard)) == 1
+        assert len(app.query(Collapsible)) == 1
+        assert "grouped 1 text chunk into 1 file" in str(
+            app.query_one("#status", Static).content
+        )
 
 
 @pytest.mark.anyio

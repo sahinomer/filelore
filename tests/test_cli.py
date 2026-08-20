@@ -20,6 +20,7 @@ from filelore.cli_display import _directory_text, _format_modified_at
 from filelore.embedding import (
     AudioEmbedding,
     AudioInput,
+    DocumentEmbedding,
     EmbeddingVector,
     ImageEmbedding,
 )
@@ -114,6 +115,35 @@ class ChunkedAudioCliEmbedding(AudioCliEmbedding):
     max_length_seconds = 0.1
 
 
+class DocumentCliEmbedding(DocumentEmbedding):
+    def __init__(self) -> None:
+        super().__init__(
+            model_id="test-document-model",
+            vector_name="text_test",
+            dimensions=3,
+        )
+
+    def predict_batch(
+        self, items: Sequence[str]
+    ) -> tuple[EmbeddingVector, ...]:
+        return tuple(
+            (1.0, 0.0, 0.0)
+            if "train" in item.casefold()
+            else (0.0, 1.0, 0.0)
+            for item in items
+        )
+
+    def predict_text_batch(
+        self, texts: Sequence[str]
+    ) -> tuple[EmbeddingVector, ...]:
+        return tuple(
+            (1.0, 0.0, 0.0)
+            if "rail" in text.casefold()
+            else (0.0, 1.0, 0.0)
+            for text in texts
+        )
+
+
 class TerminalStringIO(StringIO):
     def isatty(self) -> bool:
         return True
@@ -134,10 +164,17 @@ def test_cli_defaults_to_persistent_local_qdrant_index(
 
 def test_cli_accepts_repeatable_index_type_filters() -> None:
     args = build_argument_parser().parse_args(
-        ["--index-type", "image", "--index-type", "audio"]
+        [
+            "--index-type",
+            "image",
+            "--index-type",
+            "audio",
+            "--index-type",
+            "text",
+        ]
     )
 
-    assert args.index_types == ["image", "audio"]
+    assert args.index_types == ["image", "audio", "text"]
 
 
 def test_cli_accepts_yes_without_confirmation() -> None:
@@ -891,6 +928,7 @@ def test_cli_without_arguments_opens_interactive_search_on_a_terminal(
         assert handlers["image"].embedding_factory is image_embedding_factory
         assert handlers["image"].vector_scope == "file"
         assert handlers["audio"].vector_scope == "segment"
+        assert handlers["text"].vector_scope == "segment"
         assert tuple(file_query_vectorizers) == ("image", "audio")
         runner_calls.append(
             (tuple(handlers), tuple(allowed_targets), limit)
@@ -906,7 +944,11 @@ def test_cli_without_arguments_opens_interactive_search_on_a_terminal(
     assert exit_code == 0
     assert factory_calls == []
     assert runner_calls == [
-        (("image", "audio"), ("image", "audio"), DEFAULT_RESULT_LIMIT)
+        (
+            ("image", "audio", "text"),
+            ("image", "audio", "text"),
+            DEFAULT_RESULT_LIMIT,
+        )
     ]
 
 
@@ -938,7 +980,7 @@ def test_interactive_target_constrains_tui_without_loading_a_model(
         limit: int,
     ) -> int:
         assert file_index is not None
-        assert tuple(handlers) == ("image", "audio")
+        assert tuple(handlers) == ("image", "audio", "text")
         assert tuple(file_query_vectorizers) == ("image", "audio")
         assert limit == DEFAULT_RESULT_LIMIT
         assert factory_calls == []
@@ -1319,3 +1361,59 @@ def test_cli_search_uses_neutral_score_color_in_terminal(
     assert "\x1b[" in rendered
     assert "[36m" in rendered or ";36m" in rendered
     assert "% match" not in rendered
+
+
+def test_cli_indexes_and_searches_document_chunks(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("COLUMNS", "160")
+    database_path = tmp_path / "qdrant-index"
+    document_path = tmp_path / "travel.md"
+    document_path.write_text(
+        "# Travel Guide\n\n"
+        "## Rail Travel\n\n"
+        "Regional trains connect the main cities.\n\n"
+        "## Air Travel\n\n"
+        "Direct flights serve the largest airports.\n",
+        encoding="utf-8",
+    )
+    assert (
+        main(
+            [
+                "--index",
+                str(tmp_path),
+                "--index-type",
+                "text",
+                "--yes",
+                "--index-path",
+                str(database_path),
+            ],
+            document_embedding_factory=DocumentCliEmbedding,
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    exit_code = main(
+        [
+            "rail connections",
+            "--target",
+            "text",
+            "--format",
+            "md",
+            "--index-path",
+            str(database_path),
+        ],
+        document_embedding_factory=DocumentCliEmbedding,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Initializing text model" in captured.err
+    assert document_path.name in captured.out
+    assert "Rail Travel" in captured.out
+    assert "Regional trains connect the main cities." in captured.out
+    assert "Preview" in captured.out

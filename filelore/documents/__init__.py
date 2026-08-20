@@ -23,6 +23,15 @@ from filelore.documents.parsers import (
 )
 from filelore.documents.registry import DocumentParserRegistry
 
+
+SUPPORTED_DOCUMENT_EXTENSIONS = frozenset().union(
+    PdfDocumentParser.supported_extensions,
+    HtmlDocumentParser.supported_extensions,
+    MarkdownDocumentParser.supported_extensions,
+    DocxDocumentParser.supported_extensions,
+    PptxDocumentParser.supported_extensions,
+)
+
 __all__ = [
     "DocumentChunker",
     "DocxDocumentParser",
@@ -36,6 +45,7 @@ __all__ = [
     "ParsedDocument",
     "SentenceSplitter",
     "SourceLocation",
+    "SUPPORTED_DOCUMENT_EXTENSIONS",
     "TextBlock",
     "TextBlockType",
     "TextChunk",

@@ -8,6 +8,7 @@ from filelore.index import FileMetadataQuery, file_metadata_filter
 from filelore.search import (
     parse_search_filters,
     parse_search_query,
+    target_for_format,
     validate_search_target,
 )
 from filelore.storage import ConditionOperator
@@ -161,6 +162,11 @@ def test_interactive_query_parses_audio_filters() -> None:
     validate_search_target(parsed, "audio")
 
 
+@pytest.mark.parametrize("file_format", ("pdf", ".html", "docx", "pptx", "md"))
+def test_document_formats_resolve_to_the_text_target(file_format: str) -> None:
+    assert target_for_format(file_format) == "text"
+
+
 @pytest.mark.parametrize(
     ("query", "target", "message"),
     (
@@ -168,6 +174,9 @@ def test_interactive_query_parses_audio_filters() -> None:
         ("cat sample-rate:48000", "image", "audio target"),
         ("rain format:wav", "image", "is audio, not image"),
         ("cat format:jpg", "audio", "is image, not audio"),
+        ("guide min-res:1280x720", "text", "image target"),
+        ("guide longer-than:1", "text", "audio target"),
+        ("guide format:pdf", "audio", "is text, not audio"),
     ),
 )
 def test_interactive_query_validates_filters_for_selected_target(

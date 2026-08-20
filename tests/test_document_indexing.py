@@ -126,3 +126,20 @@ def test_file_indexer_stores_searchable_document_chunk_payloads(
         assert matches[0].record.payload["absolute_path"] == str(
             document_path.resolve()
         )
+
+        search_results = repository.semantic_segment_search(
+            embedding.predict_text("rail connections"),
+            vector_name=embedding.vector_name,
+            metadata_filter=MetadataFilter(
+                all_of=(MetadataCondition("file_type", "text"),)
+            ),
+        )
+
+        best_segment = search_results[0].segment
+        assert best_segment is not None
+        assert not best_segment.is_timed
+        assert best_segment.kind == "document_chunk"
+        assert best_segment.heading == "Rail Travel"
+        assert best_segment.section_path == ("Travel Guide", "Rail Travel")
+        assert best_segment.text is not None
+        assert "Regional trains" in best_segment.text

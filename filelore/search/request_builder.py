@@ -206,7 +206,7 @@ def resolve_search_target(
     target = selected_target or query_target
     if target is None:
         raise ValueError(
-            "Search file type is required; use --target image or --target audio"
+            "Search file type is required; use --target image, audio, or text"
         )
     return target
 

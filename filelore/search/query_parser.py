@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, time
 
+from filelore.documents import SUPPORTED_DOCUMENT_EXTENSIONS
 from filelore.index import FileMetadataQuery
 from filelore.metadata import AudioMetadataParser, ImageMetadataParser
 
@@ -76,7 +77,7 @@ def validate_search_target(parsed_query: ParsedSearchQuery, target: str) -> None
 
 def validate_search_metadata(query: FileMetadataQuery, target: str) -> None:
     """Reject metadata filters incompatible with the selected file type."""
-    if target == "audio" and any(
+    if target != "image" and any(
         value is not None
         for value in (
             query.min_width,
@@ -86,7 +87,7 @@ def validate_search_metadata(query: FileMetadataQuery, target: str) -> None:
         )
     ):
         raise ValueError("Resolution filters require the image target")
-    if target == "image" and any(
+    if target != "audio" and any(
         value is not None
         for value in (
             query.sample_rate_hz,
@@ -112,6 +113,7 @@ def target_for_format(file_format: str) -> str | None:
         for file_type, extensions in (
             ("image", ImageMetadataParser.supported_extensions),
             ("audio", AudioMetadataParser.supported_extensions),
+            ("text", SUPPORTED_DOCUMENT_EXTENSIONS),
         )
         if extension in extensions
     )

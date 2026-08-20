@@ -171,14 +171,24 @@ class QueryBar(Horizontal):
             self.working_directory,
             supported_extensions,
         )
+        self._supports_file_query = bool(supported_extensions)
         self.attached_file: Path | None = None
         self._target = "image"
 
     def compose(self) -> ComposeResult:
         yield TailPathLabel(id="query-file-label", classes="hidden")
         yield Button("×", id="clear-query-file", classes="hidden")
-        yield QueryInput(id="query", suggester=self.path_suggester)
-        yield Button("Browse", id="browse-query-file")
+        yield QueryInput(
+            id="query",
+            suggester=(
+                self.path_suggester if self._supports_file_query else None
+            ),
+        )
+        yield Button(
+            "Browse",
+            id="browse-query-file",
+            disabled=not self._supports_file_query,
+        )
 
     @property
     def input(self) -> QueryInput:
@@ -211,7 +221,9 @@ class QueryBar(Horizontal):
         label.set_path("")
         label.add_class("hidden")
         self.query_one("#clear-query-file", Button).add_class("hidden")
-        self.input.suggester = self.path_suggester
+        self.input.suggester = (
+            self.path_suggester if self._supports_file_query else None
+        )
         self.update_placeholder(self._target)
         self.input.focus()
 
@@ -221,6 +233,9 @@ class QueryBar(Horizontal):
 
     def update_placeholder(self, target: str) -> None:
         self._target = target
+        if target == "text":
+            self.input.placeholder = "Describe document content..."
+            return
         label = "image" if target == "image" else "audio"
         self.input.placeholder = (
             f"Filter similar {label} files…"
@@ -234,13 +249,26 @@ class QueryBar(Horizontal):
     ) -> None:
         """Restrict path completion to the currently selected target."""
         self.path_suggester.update_supported_extensions(supported_extensions)
+        self._supports_file_query = bool(supported_extensions)
+        self.query_one("#browse-query-file", Button).disabled = (
+            not self._supports_file_query
+        )
         if self.attached_file is None:
+            self.input.suggester = (
+                self.path_suggester if self._supports_file_query else None
+            )
             self.input.refresh_completion()
+
+    @property
+    def supports_file_query(self) -> bool:
+        return self._supports_file_query
 
     def set_controls_disabled(self, disabled: bool) -> None:
         self.input.disabled = disabled
         self.query_one("#clear-query-file", Button).disabled = disabled
-        self.query_one("#browse-query-file", Button).disabled = disabled
+        self.query_one("#browse-query-file", Button).disabled = (
+            disabled or not self._supports_file_query
+        )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "clear-query-file":

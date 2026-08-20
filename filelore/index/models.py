@@ -36,11 +36,24 @@ class DuplicateGroup:
 
 @dataclass(frozen=True, slots=True)
 class FileSegmentMatch:
-    """Raw timed segment responsible for a semantic file match."""
+    """Child segment responsible for a semantic file match."""
 
     index: int
-    start_seconds: float
-    end_seconds: float
+    start_seconds: float | None = None
+    end_seconds: float | None = None
+    kind: str | None = None
+    text: str | None = None
+    page_number: int | None = None
+    slide_number: int | None = None
+    section_path: tuple[str, ...] = ()
+    heading: str | None = None
+    source_line_start: int | None = None
+    source_line_end: int | None = None
+
+    @property
+    def is_timed(self) -> bool:
+        """Return whether this match has a complete time range."""
+        return self.start_seconds is not None and self.end_seconds is not None
 
 
 @dataclass(frozen=True, slots=True)

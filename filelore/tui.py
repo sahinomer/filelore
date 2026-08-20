@@ -90,7 +90,7 @@ class QueryHelpScreen(ModalScreen[None]):
 
 
 class SearchResultCard(Vertical):
-    """One visible file result with optional expandable audio chunks."""
+    """One visible file result with optional expandable child chunks."""
 
     def __init__(
         self,
@@ -378,8 +378,8 @@ class FileLoreSearchApp(App[None]):
                 "file" if response.grouped_file_count == 1 else "files"
             )
             status += (
-                f"  •  grouped {response.grouped_match_count} audio "
-                f"{chunk_label} "
+                f"  •  grouped {response.grouped_match_count} "
+                f"{response.request.target} {chunk_label} "
                 f"into {response.grouped_file_count} {grouped_file_label}"
             )
         status += f"  •  {_format_duration(response.timings.total_ms)}"
@@ -437,6 +437,13 @@ class FileLoreSearchApp(App[None]):
     def action_open_file_picker(self) -> None:
         if self._searching:
             return
+        query_bar = self.query_one(QueryBar)
+        if not query_bar.supports_file_query:
+            self._show_error(
+                "Reference-file search is not enabled for this target"
+            )
+            query_bar.input.focus()
+            return
         self.push_screen(
             FilePickerScreen(
                 self.working_directory,
@@ -493,7 +500,7 @@ class FileLoreSearchApp(App[None]):
         return tuple((str(limit), limit) for limit in limits)
 
     def _target_options(self) -> tuple[tuple[str, str], ...]:
-        labels = {"image": "Image", "audio": "Audio"}
+        labels = {"image": "Image", "audio": "Audio", "text": "Text"}
         return tuple(
             (labels.get(target, target.title()), target)
             for target in self.session.targets
@@ -541,6 +548,19 @@ def run_interactive_search(
 
 
 def _query_help_text(target: str) -> str:
+    if target == "text":
+        return (
+            "Write a natural description of the document content to find. "
+            "Add optional key:value filters in the same field. Quote values "
+            "that contain spaces.\n\n"
+            "Shared filters\n"
+            "name:guide            File name contains text\n"
+            "format:pdf            Document format\n"
+            "after:2025            Modified on or after a date\n"
+            "before:2026           Modified before a date\n\n"
+            "Example: regional rail connections format:pdf after:2025\n\n"
+            "Dates accept YYYY, YYYY-MM, YYYY-MM-DD, or an ISO datetime."
+        )
     shared = (
         "Write a natural description or enter a reference file path. Add "
         "optional key:value filters in the same field. Relative paths start "
@@ -591,6 +611,14 @@ def _format_filters(filters: Sequence[tuple[str, str]]) -> str:
 def _chunk_matches_renderable(
     chunks: Sequence[FileSearchResult],
 ) -> Table:
+    document_chunks = tuple(
+        chunk
+        for chunk in chunks
+        if chunk.segment is not None and not chunk.segment.is_timed
+    )
+    if document_chunks:
+        return _document_chunk_matches_renderable(document_chunks)
+
     table = Table.grid(expand=True, padding=(0, 2))
     table.add_column("Chunk", width=9, no_wrap=True)
     table.add_column("Time", ratio=1)
@@ -599,6 +627,8 @@ def _chunk_matches_renderable(
         segment = chunk.segment
         if segment is None:
             continue
+        assert segment.start_seconds is not None
+        assert segment.end_seconds is not None
         table.add_row(
             f"#{segment.index + 1}",
             (
@@ -608,6 +638,44 @@ def _chunk_matches_renderable(
             Text(f"{chunk.score:.3f}", style="cyan"),
         )
     return table
+
+
+def _document_chunk_matches_renderable(
+    chunks: Sequence[FileSearchResult],
+) -> Table:
+    table = Table.grid(expand=True, padding=(0, 2))
+    table.add_column("Chunk", width=9, no_wrap=True)
+    table.add_column("Location", ratio=1)
+    table.add_column("Preview", ratio=2, overflow="fold")
+    table.add_column("Score", width=10, justify="right", no_wrap=True)
+    for chunk in chunks:
+        segment = chunk.segment
+        if segment is None:
+            continue
+        locations: list[str] = []
+        if segment.page_number is not None:
+            locations.append(f"page {segment.page_number}")
+        if segment.slide_number is not None:
+            locations.append(f"slide {segment.slide_number}")
+        if segment.section_path:
+            locations.append(" > ".join(segment.section_path))
+        elif segment.heading:
+            locations.append(segment.heading)
+        preview = _document_chunk_preview(segment.text or "")
+        table.add_row(
+            f"#{segment.index + 1}",
+            " | ".join(locations) or "Source location unavailable",
+            preview or "Text preview unavailable",
+            Text(f"{chunk.score:.3f}", style="cyan"),
+        )
+    return table
+
+
+def _document_chunk_preview(value: str, *, limit: int = 280) -> str:
+    preview = " ".join(value.split())
+    if len(preview) > limit:
+        return f"{preview[: limit - 1].rstrip()}…"
+    return preview
 
 
 def _timestamp_text(seconds: float) -> str:

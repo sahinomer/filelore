@@ -11,11 +11,14 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from filelore.cli_display import CliDisplay
+from filelore.documents import SUPPORTED_DOCUMENT_EXTENSIONS
 from filelore.embedding import (
     AudioEmbedding,
     BaseEmbedding,
     ClapAudioEmbedding,
     ClipImageEmbedding,
+    DocumentEmbedding,
+    HarrierTextEmbedding,
     ImageEmbedding,
 )
 from filelore.index import (
@@ -27,7 +30,7 @@ from filelore.index import (
     normalized_path,
 )
 from filelore.metadata import AudioMetadataParser, ImageMetadataParser
-from filelore.processors import AudioProcessor, ImageProcessor
+from filelore.processors import AudioProcessor, DocumentProcessor, ImageProcessor
 from filelore.search import (
     FileQueryVectorizer,
     SearchRequest,
@@ -42,6 +45,7 @@ from filelore.storage import QdrantVectorDatabase, VectorDatabase
 EmbeddingFactory = Callable[[], BaseEmbedding[Any]]
 ImageEmbeddingFactory = Callable[[], ImageEmbedding]
 AudioEmbeddingFactory = Callable[[], AudioEmbedding]
+DocumentEmbeddingFactory = Callable[[], DocumentEmbedding]
 InteractiveRunner = Callable[
     [
         FileIndexRepository,
@@ -92,7 +96,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--target",
         "--type",
         dest="target",
-        choices=("image", "audio"),
+        choices=("image", "audio", "text"),
         help="search file type; required unless --format implies it",
     )
     parser.add_argument(
@@ -119,7 +123,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--format",
         dest="file_format",
         metavar="FORMAT",
-        help="only return files with this format, such as PNG, JPEG, WAV, or MP3",
+        help=(
+            "only return files with this format, such as PNG, WAV, PDF, or DOCX"
+        ),
     )
     search_options.add_argument(
         "--min-resolution",
@@ -183,7 +189,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--index-type",
         dest="index_types",
         action="append",
-        choices=("image", "audio"),
+        choices=("image", "audio", "text"),
         metavar="TYPE",
         help=(
             "only index this file type; repeat to select multiple types "
@@ -238,6 +244,7 @@ def main(
     *,
     image_embedding_factory: ImageEmbeddingFactory | None = None,
     audio_embedding_factory: AudioEmbeddingFactory | None = None,
+    document_embedding_factory: DocumentEmbeddingFactory | None = None,
     interactive_runner: InteractiveRunner | None = None,
 ) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
@@ -246,6 +253,7 @@ def main(
     embedding_factories = _embedding_factories(
         image=image_embedding_factory,
         audio=audio_embedding_factory,
+        document=document_embedding_factory,
     )
     index_handlers = _index_handlers(embedding_factories)
     search_targets = _search_targets(index_handlers)
@@ -435,11 +443,13 @@ def _embedding_factories(
     *,
     image: ImageEmbeddingFactory | None = None,
     audio: AudioEmbeddingFactory | None = None,
+    document: DocumentEmbeddingFactory | None = None,
 ) -> dict[str, EmbeddingFactory]:
     """Return the enabled default target-to-model factory registry."""
     return {
         "image": image or ClipImageEmbedding,
         "audio": audio or ClapAudioEmbedding,
+        "text": document or HarrierTextEmbedding,
     }
 
 
@@ -493,6 +503,13 @@ def _index_handlers(
             processor_factory=_audio_processor_for,
             vector_scope="segment",
         ),
+        IndexHandler(
+            file_type="text",
+            extensions=SUPPORTED_DOCUMENT_EXTENSIONS,
+            embedding_factory=embedding_factories["text"],
+            processor_factory=_document_processor_for,
+            vector_scope="segment",
+        ),
     )
 
 
@@ -523,6 +540,14 @@ def _audio_processor_for(
     if not isinstance(embedding, AudioEmbedding):
         raise TypeError("Audio index handler requires an audio embedding")
     return AudioProcessor(embedding=embedding)
+
+
+def _document_processor_for(
+    embedding: BaseEmbedding[Any],
+) -> DocumentProcessor:
+    if not isinstance(embedding, DocumentEmbedding):
+        raise TypeError("Text index handler requires a document embedding")
+    return DocumentProcessor(embedding=embedding)
 
 
 def _index_directory(

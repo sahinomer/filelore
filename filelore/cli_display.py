@@ -316,6 +316,8 @@ def _add_search_result_rows(
     )
     if result.segment is not None:
         table.add_row("", _segment_text(result.segment), "")
+        if result.segment.text:
+            table.add_row("", _segment_preview_text(result.segment.text), "")
     table.add_row("", _modified_text(result.file.metadata), "")
 
 
@@ -342,8 +344,10 @@ def _directory_text(directory: Path) -> Text:
 
 def _details_text(metadata: dict[str, Any], *, file_type: str) -> Text:
     details: list[str] = []
-    media_format = metadata.get(f"{file_type}_format") or metadata.get(
-        "extension"
+    media_format = (
+        metadata.get(f"{file_type}_format")
+        or metadata.get("document_format")
+        or metadata.get("extension")
     )
     if media_format:
         details.append(str(media_format).lstrip(".").upper())
@@ -394,11 +398,42 @@ def _details_text(metadata: dict[str, Any], *, file_type: str) -> Text:
 
 def _segment_text(segment: FileSegmentMatch) -> Text:
     text = Text("Chunk      ", style="dim")
+    if not segment.is_timed:
+        details = [f"#{segment.index + 1}"]
+        if segment.page_number is not None:
+            details.append(f"page {segment.page_number}")
+        if segment.slide_number is not None:
+            details.append(f"slide {segment.slide_number}")
+        if segment.section_path:
+            details.append(" > ".join(segment.section_path))
+        elif segment.heading:
+            details.append(segment.heading)
+        if segment.source_line_start is not None:
+            line_range = str(segment.source_line_start)
+            if (
+                segment.source_line_end is not None
+                and segment.source_line_end != segment.source_line_start
+            ):
+                line_range += f"-{segment.source_line_end}"
+            details.append(f"lines {line_range}")
+        text.append("  |  ".join(details))
+        return text
+    assert segment.start_seconds is not None
+    assert segment.end_seconds is not None
     text.append(
         f"#{segment.index + 1}  "
         f"{_timestamp_text(segment.start_seconds)} – "
         f"{_timestamp_text(segment.end_seconds)}"
     )
+    return text
+
+
+def _segment_preview_text(value: str, *, limit: int = 280) -> Text:
+    preview = " ".join(value.split())
+    if len(preview) > limit:
+        preview = f"{preview[: limit - 1].rstrip()}…"
+    text = Text("Preview    ", style="dim")
+    text.append(preview)
     return text
 
 

@@ -353,7 +353,7 @@ class FileIndexRepository:
         limit: int = 10,
         metadata_filter: MetadataFilter | None = None,
     ) -> tuple[FileSearchResult, ...]:
-        """Return raw timed child matches without grouping parent files."""
+        """Return raw child matches without grouping parent files."""
         if not self.database.collection_exists(self.segment_collection_name):
             return ()
         results = self.database.search(
@@ -452,13 +452,43 @@ class FileIndexRepository:
 
     @staticmethod
     def _to_segment(record: StoredRecord) -> FileSegmentMatch:
+        payload = record.payload
         try:
+            start_value = payload.get("segment_start_seconds")
+            end_value = payload.get("segment_end_seconds")
+            if (start_value is None) != (end_value is None):
+                raise ValueError("Segment has an incomplete time range")
+            section_value = payload.get("section_path", ())
+            if not isinstance(section_value, (list, tuple)):
+                raise TypeError("Segment section path must be a sequence")
             return FileSegmentMatch(
-                index=int(record.payload["segment_index"]),
-                start_seconds=float(record.payload["segment_start_seconds"]),
-                end_seconds=float(record.payload["segment_end_seconds"]),
+                index=int(payload["segment_index"]),
+                start_seconds=(
+                    float(start_value) if start_value is not None else None
+                ),
+                end_seconds=(
+                    float(end_value) if end_value is not None else None
+                ),
+                kind=_optional_string(payload.get("segment_kind")),
+                text=_optional_string(payload.get("chunk_text")),
+                page_number=_optional_int(payload.get("page_number")),
+                slide_number=_optional_int(payload.get("slide_number")),
+                section_path=tuple(str(item) for item in section_value),
+                heading=_optional_string(payload.get("heading")),
+                source_line_start=_optional_int(
+                    payload.get("source_line_start")
+                ),
+                source_line_end=_optional_int(payload.get("source_line_end")),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError(
-                f"Segment record {record.id} has invalid timestamps"
+                f"Segment record {record.id} has invalid metadata"
             ) from error
+
+
+def _optional_string(value: object) -> str | None:
+    return str(value) if value is not None else None
+
+
+def _optional_int(value: object) -> int | None:
+    return int(value) if value is not None else None
