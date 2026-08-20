@@ -254,7 +254,10 @@ def _embedding_text(
     included_headings = {
         unit.text.casefold()
         for unit in units
-        if unit.block_type is TextBlockType.HEADING
+        if unit.block_type in {
+            TextBlockType.HEADING,
+            TextBlockType.SLIDE_TITLE,
+        }
     }
     missing_context = tuple(
         heading

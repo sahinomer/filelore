@@ -236,6 +236,25 @@ def test_paragraph_chunker_restores_heading_context_on_continuation() -> None:
     assert chunks[1].embedding_text == "Konu\n\nİkinci cümle."
 
 
+def test_paragraph_chunker_treats_a_slide_title_as_included_context() -> None:
+    section = ("Sunum Başlığı",)
+    document = parsed_document(
+        block(
+            0,
+            "Sunum Başlığı",
+            block_type=TextBlockType.SLIDE_TITLE,
+            slide=1,
+            section=section,
+        ),
+        block(1, "Slayt içeriği.", slide=1, section=section),
+    )
+
+    chunk = ParagraphChunker(max_characters=100).chunks(document)[0]
+
+    assert chunk.text == "Sunum Başlığı\n\nSlayt içeriği."
+    assert chunk.embedding_text == chunk.text
+
+
 def test_paragraph_chunker_handles_empty_documents() -> None:
     assert ParagraphChunker().chunks(parsed_document()) == ()
 

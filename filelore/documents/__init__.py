@@ -19,6 +19,7 @@ from filelore.documents.parsers import (
     HtmlDocumentParser,
     MarkdownDocumentParser,
     PdfDocumentParser,
+    PptxDocumentParser,
 )
 from filelore.documents.registry import DocumentParserRegistry
 
@@ -31,6 +32,7 @@ __all__ = [
     "MarkdownDocumentParser",
     "ParagraphChunker",
     "PdfDocumentParser",
+    "PptxDocumentParser",
     "ParsedDocument",
     "SentenceSplitter",
     "SourceLocation",
