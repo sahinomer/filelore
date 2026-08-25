@@ -57,7 +57,8 @@ MRR, Recall, NDCG, and query-latency measurements against an existing index.
 ## Profiling
 
 See the [indexing profiler guide](profiling/README.md) for external stage,
-resource, disk-I/O, and GPU observation of the real indexing pipeline.
+resource, disk-I/O, and GPU observation of the image, audio, and document
+indexing pipelines.
 
 ## Index
 

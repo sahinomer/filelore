@@ -17,12 +17,19 @@ Install the optional model and profiler dependencies:
 uv sync --extra embedding --group profiling
 ```
 
-Profile either or both datasets:
+Profile one or more datasets:
 
 ```sh
 uv run --extra embedding --group profiling python -m profiling.index_pipeline \
   --image-directory /path/to/image \
   --audio-directory /path/to/audio
+```
+
+Profile a mixed-format document corpus:
+
+```sh
+uv run --extra embedding --group profiling python -m profiling.index_pipeline \
+  --document-directory /path/to/documents
 ```
 
 Profile the same workload against a running Qdrant service:
@@ -36,8 +43,8 @@ uv run --extra embedding --group profiling python -m profiling.index_pipeline \
 
 The default uses an isolated temporary local Qdrant index, the production
 index batch size of 100, a 200 ms resource-sampling interval, and the standard
-CLIP and CLAP models. Models must already be downloaded if the machine is
-offline.
+CLIP, CLAP, and Harrier models. Models must already be downloaded if the
+machine is offline.
 
 Use `--index-path` to retain the diagnostic index. For safety, an explicit
 index path must be absent or empty; the profiler never clears an existing
@@ -64,6 +71,8 @@ The semantic timeline covers:
   forward execution, and vector postprocessing;
 - audio metadata, segment planning, decode/downmix/resample, CLAP feature
   extraction, transfers, CUDA forward execution, and vector postprocessing;
+- document parsing, structure-aware chunking, SentenceTransformer
+  preprocessing, CUDA forward execution, and vector postprocessing;
 - Qdrant collection setup, segment deletion, record preparation, and upserts;
 - per-modality queues and the complete indexing run.
 
@@ -90,10 +99,11 @@ Raw output remains ignored because profiles are environment-specific and can
 be large. Concise reviewed observations can be committed under
 `profiling/reports/`.
 
-## Recorded full-pipeline profile
+## Recorded profiles
 
-These results provide a relative view of the indexing pipeline on the test
-system.
+These results provide a relative view of the image, audio, and document
+indexing pipelines on the test system. Image and audio were profiled together;
+documents were profiled in a separate mixed-format run.
 
 ### Test system
 
@@ -102,32 +112,46 @@ system.
 | CPU | AMD Ryzen 7 5800H |
 | GPU | NVIDIA GeForce RTX 3070 Laptop GPU (8 GB) |
 
-Configuration: Windows 11, Python 3.12.3, PyTorch 2.13.0 with CUDA
-13.0, Transformers 4.57.6, index batch size 100,
-`openai/clip-vit-base-patch32`, and `laion/larger_clap_general`. The Local Mode
-profile used an isolated temporary index. The service profile used Qdrant
+Shared configuration: Windows 11, Python 3.12.3, PyTorch 2.13.0 with CUDA
+13.0, and index batch size 100. The image/audio run used Transformers 4.57.6,
+`openai/clip-vit-base-patch32`, and `laion/larger_clap_general`. Its Local Mode
+profile used an isolated temporary index; its service profile used Qdrant
 1.18.3 in Docker through `http://127.0.0.1:6333`.
+
+The document run used SentenceTransformers 5.7.0,
+`microsoft/harrier-oss-v1-270m`, and an isolated temporary Qdrant Local Mode
+index. All document formats ran together so model lifetime, batching, storage,
+and resource use represent a normal mixed indexing session.
 
 | Dataset | Workload | Items |
 | --- | --- | ---: |
 | [COCO 2017 validation images](https://cocodataset.org/#download) | Image | 5,000 |
 | [Clotho evaluation split](https://zenodo.org/records/3490684) | Audio | 1,045 |
+| [RAG-Multi-Corpus](https://github.com/udayallu/RAG-Multi-Corpus) | Documents | 1,180 |
 
-| Phase | End-to-end time | Share of run | End-to-end source throughput | Queue time | Queue source throughput |
+| Workload | End-to-end time | Source throughput | Queue time | Queue throughput | Model inputs |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Image | 85.47 s | 33.76% | 58.50 images/s | 70.59 s | 70.83 images/s |
-| Audio | 167.71 s | 66.24% | 6.23 files/s | 160.93 s | 6.49 files/s |
-| Complete run | 253.19 s | 100.00% | - | - | - |
+| Image | 85.47 s | 58.50 images/s | 70.59 s | 70.83 images/s | 5,000 images |
+| Audio | 167.71 s | 6.23 files/s | 160.93 s | 6.49 files/s | 4,160 segments |
+| Documents | 161.17 s | 7.32 files/s | 147.90 s | 7.98 files/s | 11,841 chunks |
 
 Audio throughput is reported per source file; the 1,045 audio files produced
 4,160 overlapping segments (3.98 model inputs per file), so chunking contributes
 substantially to the lower files/s figure and corresponds to 24.80 segments/s
 end-to-end and 25.85 segments/s within the indexing queue.
 
+All 1,180 documents indexed successfully and produced 52,437 structural blocks,
+11,841 chunks, and 4,761,905 embedding-input characters. The corpus contained
+236 files of each supported format, so no format dominated the mixed result by
+file count. Document throughput corresponds to 73.47 chunks/s end-to-end and
+80.06 chunks/s within the indexing queue.
+
 ### Qdrant mode comparison
 
-Both profiles use the same datasets, models, segmentation settings, and index
-batch size.
+This comparison applies to the image/audio workload. Both runs used the same
+datasets, models, segmentation settings, and index batch size. Documents were
+profiled only in Local Mode because the image/audio comparison already isolates
+the storage-mode effect.
 
 | Metric | Local Mode | Qdrant service | Change |
 | --- | ---: | ---: | ---: |
@@ -140,18 +164,18 @@ batch size.
 
 ### End-to-end phase steps
 
-Each percentage is relative to its modality's complete end-to-end time. These
+Each percentage is relative to that workload's complete end-to-end time. These
 rows are non-overlapping and include work outside the indexing queues.
 
-| Pipeline step | Image time | Image share | Audio time | Audio share |
-| --- | ---: | ---: | ---: | ---: |
-| Discovery | 0.15 s | 0.18% | 0.03 s | 0.02% |
-| Collection setup and existing-record lookup | 0.72 s | 0.84% | 0.16 s | 0.10% |
-| Full-file hashing | 3.08 s | 3.61% | 1.69 s | 1.01% |
-| Model loading | 10.29 s | 12.03% | 4.23 s | 2.52% |
-| Indexing queue | 70.59 s | 82.59% | 160.93 s | 95.95% |
-| Model cleanup | 0.16 s | 0.19% | 0.20 s | 0.12% |
-| Unassigned phase/control-flow overhead | 0.48 s | 0.56% | 0.47 s | 0.28% |
+| Pipeline step | Image | Audio | Documents |
+| --- | ---: | ---: | ---: |
+| Discovery | 0.15 s (0.18%) | 0.03 s (0.02%) | 0.03 s (0.02%) |
+| Collection setup and existing-record lookup | 0.72 s (0.84%) | 0.16 s (0.10%) | 0.19 s (0.12%) |
+| Full-file hashing | 3.08 s (3.61%) | 1.69 s (1.01%) | 0.37 s (0.23%) |
+| Model loading | 10.29 s (12.03%) | 4.23 s (2.52%) | 12.27 s (7.61%) |
+| Indexing queue | 70.59 s (82.59%) | 160.93 s (95.95%) | 147.90 s (91.76%) |
+| Model cleanup | 0.16 s (0.19%) | 0.20 s (0.12%) | 0.26 s (0.16%) |
+| Unassigned phase/control-flow overhead | 0.48 s (0.56%) | 0.47 s (0.28%) | 0.15 s (0.09%) |
 
 ### Pipeline order
 
@@ -174,6 +198,14 @@ discover -> collections/lookup -> hash -> load CLAP
           -> host-to-device -> GPU forward -> device-to-host
           -> vector postprocessing]
       -> prepare file and segment records and write to Qdrant]
+  -> model cleanup
+
+Documents
+discover -> collections/lookup -> hash -> load Harrier
+  -> [parse -> structure-aware chunking
+      -> SentenceTransformer preprocessing -> GPU forward
+      -> vector postprocessing
+      -> prepare file and chunk records and write to Qdrant]
   -> model cleanup
 ```
 
@@ -214,20 +246,69 @@ to approximately 100% after rounding.
 | Record preparation and Qdrant write | 25.49 s | 15.84% |
 | Unassigned queue/control-flow overhead | 1.10 s | 0.68% |
 
+### Document queue
+
+These are non-overlapping leaf stages relative to the 147.90-second document
+queue. Small framework, deletion, serialization, and control-flow costs are
+combined under other overhead.
+
+| Pipeline step | Time | Share of document queue |
+| --- | ---: | ---: |
+| Document parsing | 27.69 s | 18.72% |
+| Structure-aware chunking | 0.77 s | 0.52% |
+| SentenceTransformer preprocessing | 1.47 s | 1.00% |
+| GPU forward | 48.04 s | 32.48% |
+| Vector postprocessing | 0.77 s | 0.52% |
+| Qdrant Local Mode upserts | 64.45 s | 43.58% |
+| Other overhead | 4.71 s | 3.19% |
+
+Local Qdrant upserts were the largest queue cost, followed by Harrier GPU
+forward execution and document parsing. Chunking consumed only 0.52% of queue
+time. Stage timings are inclusive in the generated summary; this table uses
+leaf stages to avoid double counting.
+
+### Document parser comparison
+
+The main document result remains the mixed workload. These parser rows are
+derived from per-file events within that run; no format-specific reruns were
+needed.
+
+| Format | Files | Input | Parse time | Median/file | p95/file | Blocks | Chunks |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| DOCX | 236 | 2.790 MiB | 9.325 s | 29.205 ms | 93.613 ms | 11,784 | 2,841 |
+| HTML | 236 | 1.363 MiB | 1.814 s | 6.101 ms | 17.305 ms | 11,774 | 2,837 |
+| Markdown | 236 | 1.015 MiB | 0.843 s | 2.732 ms | 7.849 ms | 12,182 | 2,841 |
+| PDF | 236 | 6.278 MiB | 10.689 s | 32.665 ms | 115.161 ms | 4,913 | 851 |
+| PPTX | 236 | 8.612 MiB | 5.013 s | 17.533 ms | 46.102 ms | 11,784 | 2,471 |
+
+PDF and DOCX accounted for 72.29% of parsing time. The formats contain
+equivalent corpus material, but their extracted structural boundaries differ;
+that is reflected in the chunk totals and should not be interpreted as a
+parser-quality score.
+
 ### Resource consumption
 
-The profiler collected 1,233 samples at a target interval of 200 ms. Process
-CPU is normalized across the test system's 16 logical processors. GPU metrics
-are device-wide readings from `nvidia-smi`; GPU memory can therefore include
-allocations from the driver and other processes.
+The image/audio and document profiles are separate runs, so combining their
+averages would not describe either workload. The comparison therefore uses
+the maximum observed demand from each run. The profiler collected 1,233
+image/audio samples and 777 document samples at a target interval of 200 ms.
 
-| Resource | Average | p95 | Maximum |
-| --- | ---: | ---: | ---: |
-| Process CPU | 9.82% | 35.67% | 63.02% |
-| Process RAM | 1,427.27 MiB | 1,720.02 MiB | 1,892.04 MiB |
-| GPU utilization | 16.25% | 100.00% | 100.00% |
-| GPU memory used | 2,526.29 MiB | 3,089 MiB | 3,091 MiB |
-| GPU power | 49.05 W | 70.43 W | 76.78 W |
+| Resource | Image/audio peak | Document peak |
+| --- | ---: | ---: |
+| Process CPU, normalized across 16 logical processors | 63.02% | 9.62% |
+| Process RAM | 1,892.04 MiB | 2,028.38 MiB |
+| GPU utilization | 100.00% | 100.00% |
+| GPU memory used | 3,091 MiB | 2,999 MiB |
+| GPU power | 76.78 W | 114.91 W |
 
-The cumulative FileLore process I/O counters recorded 7,059.21 MiB read and
-337.21 MiB written during the run.
+GPU metrics are device-wide readings from `nvidia-smi`; GPU memory can
+therefore include allocations from the driver and other processes. The raw
+document process-CPU peak was 153.90% under psutil's multicore semantics,
+equivalent to 9.62% of the test system's total logical-CPU capacity. Its
+system-wide CPU peak was 18.20%, and GPU activity was nonzero in 80.93% of
+samples.
+
+| Cumulative FileLore process I/O | Image/audio | Documents |
+| --- | ---: | ---: |
+| Read | 7,059.21 MiB | 246.27 MiB |
+| Written | 337.21 MiB | 462.00 MiB |
