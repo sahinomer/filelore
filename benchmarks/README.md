@@ -82,8 +82,24 @@ multilingual document chunks targeting the chunker's 1,600-character maximum,
 
 Batch size 32 was the best tested size for both workloads. Compared with model
 batch size 1, it increased document throughput by 6.16x and query throughput by
-27.45x. Peak allocated GPU memory was 739.382 MB for the document workload at
-that batch size.
+27.45x.
+
+## Peak GPU memory
+
+The embedding benchmarks reset PyTorch's peak-memory statistics before each
+measured workload. The values below are peak CUDA memory allocated by PyTorch,
+including the loaded model; they are not whole-device VRAM utilization. The
+best-batch column uses the batch size with the highest median throughput for
+that workload. CLIP uses the `use_fast=True` result.
+
+| Model | Role | Workload | Single item | Best-throughput batch |
+| --- | --- | --- | ---: | ---: |
+| CLIP | Index | Image | 588.122 MB | 632.454 MB (batch 16) |
+| CLIP | Query | Text | 585.519 MB | 595.659 MB (batch 32) |
+| CLAP | Index | Audio | 785.653 MB | 1,303.105 MB (batch 16) |
+| CLAP | Query | Text | 750.326 MB | 755.214 MB (batch 16) |
+| Harrier | Index | Document chunk | 533.879 MB | 739.382 MB (batch 32) |
+| Harrier | Query | Text | 520.387 MB | 536.256 MB (batch 32) |
 
 ## Qdrant storage
 
