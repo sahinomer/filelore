@@ -60,6 +60,31 @@ systems.
 | Audio | 44.887 ms | 49.812 ms | 20.075 items/s | 16 | 29.205 ms | 34.240 items/s |
 | Text | 11.129 ms | 11.244 ms | 88.933 items/s | 16 | 0.914 ms | 1094.335 items/s |
 
+## Harrier embedding
+
+```sh
+uv run --extra embedding python -m benchmarks.harrier_embedding
+```
+
+Add `--output benchmarks/results/harrier.json` to save the full result locally.
+The baseline score is the best median document-embedding throughput among the
+configured batch sizes.
+
+Configuration: `microsoft/harrier-oss-v1-270m`, 64 deterministic synthetic
+multilingual document chunks targeting the chunker's 1,600-character maximum,
+64 multilingual queries using the `web_search_query` prompt, batch sizes
+1/8/16/32, 2 warm-up runs, and 5 measured runs.
+
+| Workload | Single-item median | Sequential median/item | Sequential throughput | Best batch | Best median/item | Best throughput |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Document chunk | 50.248 ms | 47.824 ms | 20.910 items/s | 32 | 7.759 ms | 128.875 items/s |
+| Query | 49.555 ms | 46.584 ms | 21.467 items/s | 32 | 1.697 ms | 589.188 items/s |
+
+Batch size 32 was the best tested size for both workloads. Compared with model
+batch size 1, it increased document throughput by 6.16x and query throughput by
+27.45x. Peak allocated GPU memory was 739.382 MB for the document workload at
+that batch size.
+
 ## Qdrant storage
 
 Run the same workload in Python Local Mode and against a Qdrant service:
