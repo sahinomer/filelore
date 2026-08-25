@@ -8,17 +8,27 @@ from typing import Any, Sequence
 import pytest
 
 from evaluation.retrieval import (
+    DocumentQueryOutcome,
+    DocumentRetrievalAnnotation,
+    DocumentViewQuery,
     EligibleQuery,
     RetrievalAnnotation,
     build_argument_parser,
+    calculate_document_retrieval_metrics,
     calculate_latency_metrics,
     calculate_retrieval_metrics,
     default_result_path,
+    document_queries_for_view,
+    document_relevant_ranks,
+    embed_document_queries,
+    evaluate_document_queries,
     evaluate_queries,
+    filter_indexed_document_annotations,
     filter_indexed_annotations,
     measure_query_latency,
     parse_clotho_annotations,
     parse_coco_annotations,
+    parse_document_annotations,
     percentile,
     select_latency_queries,
     unique_file_results,
@@ -43,6 +53,22 @@ def result(identifier: str, name: str, score: float) -> FileSearchResult:
     return FileSearchResult(entry(identifier, name, "audio"), score)
 
 
+def document_entry(
+    identifier: str,
+    enterprise: str,
+    file_format: str,
+    stem: str,
+) -> FileIndexEntry:
+    return FileIndexEntry(
+        id=identifier,
+        path=Path("dataset") / enterprise / file_format / f"{stem}.{file_format}",
+        content_hash="hash",
+        file_type="text",
+        metadata={},
+        indexed_at=datetime.now(timezone.utc),
+    )
+
+
 class FakeTextEmbedding(TextEmbedding[str]):
     def __init__(self) -> None:
         super().__init__(model_id="fake", vector_name="fake_vector", dimensions=1)
@@ -63,6 +89,7 @@ class FakeIndex:
         self.search_results = tuple(search_results)
         self.file_calls = 0
         self.segment_calls = 0
+        self.segment_arguments: list[dict[str, Any]] = []
 
     def semantic_search(self, *_: Any, **__: Any) -> tuple[FileSearchResult, ...]:
         self.file_calls += 1
@@ -72,7 +99,43 @@ class FakeIndex:
         self, *_: Any, **__: Any
     ) -> tuple[FileSearchResult, ...]:
         self.segment_calls += 1
+        self.segment_arguments.append(__)
         return self.search_results
+
+
+def test_parse_document_annotations_merges_duplicate_queries(
+    tmp_path: Path,
+) -> None:
+    annotations = tmp_path / "documents.csv"
+    annotations.write_text(
+        "Enterprise Name,Query Type,Query,Supporting Facts\n"
+        'Example,Descriptive,Where is it?,"[{""filename"": '
+        '""first.md"", ""text"": ""one""}]"\n'
+        'Example,Descriptive,Where is it?,"[{""filename"": '
+        '""second.md"", ""text"": ""two""}]"\n'
+        'Example,Safety,Is it safe?,"[{""filename"": '
+        '""safety.md"", ""text"": ""yes""}]"\n',
+        encoding="utf-8",
+    )
+
+    parsed = parse_document_annotations(annotations)
+
+    assert parsed == (
+        DocumentRetrievalAnnotation(
+            enterprise="Example",
+            query_type="Descriptive",
+            query="Where is it?",
+            relevant_files=("first.md", "second.md"),
+            source_rows=2,
+        ),
+        DocumentRetrievalAnnotation(
+            enterprise="Example",
+            query_type="Other",
+            query="Is it safe?",
+            relevant_files=("safety.md",),
+            source_rows=1,
+        ),
+    )
 
 
 def test_parse_clotho_expands_caption_columns(tmp_path: Path) -> None:
@@ -136,6 +199,77 @@ def test_filter_only_keeps_unique_indexed_target_files() -> None:
     assert coverage.ambiguous_files == ("duplicate.jpg",)
 
 
+def test_document_coverage_keeps_partially_resolved_queries() -> None:
+    annotations = (
+        DocumentRetrievalAnnotation(
+            enterprise="CloudWay 24",
+            query_type="Comparative",
+            query="Compare them",
+            relevant_files=("Available.md", "Corrupted.md"),
+            source_rows=2,
+        ),
+        DocumentRetrievalAnnotation(
+            enterprise="CloudWay 24",
+            query_type="Boolean",
+            query="Is the missing document available?",
+            relevant_files=("Missing.md",),
+            source_rows=1,
+        ),
+    )
+    indexed = (
+        document_entry("md", "CloudWay-24", "md", "Available"),
+        document_entry("pdf", "CloudWay-24", "pdf", "Available"),
+    )
+
+    coverage = filter_indexed_document_annotations(annotations, indexed)
+
+    assert coverage.annotation_rows == 3
+    assert coverage.annotation_queries == 2
+    assert coverage.partially_covered_queries == 1
+    assert coverage.fully_covered_queries == 0
+    assert coverage.skipped_queries == 1
+    assert coverage.missing_files == (
+        "CloudWay 24/Corrupted.md",
+        "CloudWay 24/Missing.md",
+    )
+    assert coverage.missing_format_variants == {
+        "CloudWay 24/Available.md": ("docx", "html", "pptx")
+    }
+    assert len(coverage.eligible_queries) == 1
+    assert coverage.eligible_queries[0].relevant_documents[0].logical_id
+    assert document_queries_for_view(
+        coverage.eligible_queries, file_format="md"
+    )[0].relevant_logical_ids == (
+        coverage.eligible_queries[0].relevant_documents[0].logical_id,
+    )
+    assert document_queries_for_view(
+        coverage.eligible_queries, file_format="docx"
+    ) == ()
+
+
+def test_document_filename_resolution_handles_filesystem_punctuation() -> None:
+    annotation = DocumentRetrievalAnnotation(
+        enterprise="ZX Bank",
+        query_type="Open-Ended",
+        query="What can Zia do?",
+        relevant_files=("ASK Zia – Your 24:7 Banking Assistant.md",),
+        source_rows=1,
+    )
+    indexed = (
+        document_entry(
+            "zia",
+            "ZX Bank",
+            "md",
+            "ASK Zia – Your 24_7 Banking Assistant",
+        ),
+    )
+
+    coverage = filter_indexed_document_annotations((annotation,), indexed)
+
+    assert len(coverage.eligible_queries) == 1
+    assert coverage.missing_files == ()
+
+
 def test_metrics_for_one_relevant_file_per_query() -> None:
     metrics = calculate_retrieval_metrics((1, 2, None), (1, 2))
 
@@ -149,6 +283,39 @@ def test_metrics_for_one_relevant_file_per_query() -> None:
     )
 
 
+def test_document_metrics_score_multiple_relevant_files() -> None:
+    outcomes = (
+        DocumentQueryOutcome(
+            enterprise="Example",
+            query_type="Comparative",
+            query="Compare them",
+            relevant_count=2,
+            relevant_logical_ids=("a", "b"),
+            relevant_ranks=(1, 3),
+            returned_physical_files=3,
+        ),
+        DocumentQueryOutcome(
+            enterprise="Example",
+            query_type="Comparative",
+            query="Find it",
+            relevant_count=1,
+            relevant_logical_ids=("c",),
+            relevant_ranks=(),
+            returned_physical_files=3,
+        ),
+    )
+
+    metrics = calculate_document_retrieval_metrics(outcomes, (1, 3))
+
+    assert metrics[0].hit == pytest.approx(0.5)
+    assert metrics[0].recall == pytest.approx(0.25)
+    assert metrics[0].complete == 0
+    assert metrics[1].mrr == pytest.approx(0.5)
+    assert metrics[1].recall == pytest.approx(0.5)
+    assert metrics[1].map == pytest.approx((1 + 2 / 3) / 4)
+    assert metrics[1].complete == pytest.approx(0.5)
+
+
 def test_unique_file_results_deduplicates_audio_parents() -> None:
     results = (
         result("a", "a.wav", 0.9),
@@ -157,6 +324,91 @@ def test_unique_file_results_deduplicates_audio_parents() -> None:
     )
 
     assert [item.file.id for item in unique_file_results(results)] == ["a", "b"]
+
+
+def test_document_ranks_penalize_repeated_format_variants() -> None:
+    results = (
+        FileSearchResult(
+            document_entry("a-md", "Example", "md", "A"), 0.9
+        ),
+        FileSearchResult(
+            document_entry("a-pdf", "Example", "pdf", "A"), 0.8
+        ),
+        FileSearchResult(
+            document_entry("b-md", "Example", "md", "B"), 0.7
+        ),
+    )
+
+    ranks = document_relevant_ranks(
+        results,
+        ("logical-a", "logical-b"),
+        {
+            "a-md": "logical-a",
+            "a-pdf": "logical-a",
+            "b-md": "logical-b",
+        },
+    )
+
+    assert ranks == (1, 3)
+
+
+def test_document_evaluation_uses_segment_search_and_format_filter() -> None:
+    relevant = document_entry("relevant", "Example", "md", "Relevant")
+    index = FakeIndex((FileSearchResult(relevant, 0.9),))
+    clock_value = -0.01
+
+    def clock() -> float:
+        nonlocal clock_value
+        clock_value += 0.01
+        return clock_value
+
+    query = DocumentViewQuery(
+        enterprise="Example",
+        query_type="Descriptive",
+        query="Find it",
+        relevant_logical_ids=("logical",),
+    )
+    embedding = FakeTextEmbedding()
+    embedding_cache = embed_document_queries(
+        embedding,
+        (query,),
+        batch_size=2,
+    )
+
+    evaluated = evaluate_document_queries(
+        index,  # type: ignore[arg-type]
+        (query,),
+        embedding_cache=embedding_cache,
+        vector_name=embedding.vector_name,
+        logical_id_by_file_id={"relevant": "logical"},
+        file_format="md",
+        cutoffs=(1,),
+        candidate_limit=10,
+        batch_size=2,
+        clock=clock,
+    )
+    evaluate_document_queries(
+        index,  # type: ignore[arg-type]
+        (query,),
+        embedding_cache=embedding_cache,
+        vector_name=embedding.vector_name,
+        logical_id_by_file_id={"relevant": "logical"},
+        file_format=None,
+        cutoffs=(1,),
+        candidate_limit=10,
+        batch_size=2,
+        clock=clock,
+    )
+
+    assert index.file_calls == 0
+    assert index.segment_calls == 2
+    assert embedding.text_batches == [("Find it",)]
+    metadata_filter = index.segment_arguments[0]["metadata_filter"]
+    assert [(item.field, item.value) for item in metadata_filter.all_of] == [
+        ("file_type", "text"),
+        ("format_key", "md"),
+    ]
+    assert evaluated.metrics[0].recall == 1
 
 
 def test_latency_uses_average_and_interpolated_percentiles() -> None:
