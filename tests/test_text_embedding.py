@@ -32,7 +32,7 @@ class FakeModel:
         self.evaluation_mode = False
         self.encode_calls: list[tuple[list[str], dict[str, Any]]] = []
 
-    def get_sentence_embedding_dimension(self) -> int | None:
+    def get_embedding_dimension(self) -> int | None:
         return self.dimensions
 
     def eval(self) -> FakeModel:

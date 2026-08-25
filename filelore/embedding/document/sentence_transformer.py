@@ -76,7 +76,7 @@ class SentenceTransformerTextEmbedding(DocumentEmbedding):
             model_kwargs=configured_model_kwargs,
             trust_remote_code=trust_remote_code,
         )
-        dimensions = model.get_sentence_embedding_dimension()
+        dimensions = model.get_embedding_dimension()
         if not isinstance(dimensions, int) or dimensions < 1:
             raise ValueError(
                 f"Sentence Transformer model {model_id!r} has no valid "
