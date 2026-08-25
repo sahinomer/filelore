@@ -1,8 +1,8 @@
 # FileLore
 
-FileLore is a local-first indexing and semantic-search project. It provides a
-small foundation for building searchable file indexes while keeping storage
-and retrieval under the user's control.
+FileLore is a file-indexing and semantic-search framework for images, audio,
+and text documents. It provides a focused foundation for discovering, parsing,
+chunking, embedding, storing, and retrieving file content.
 
 ## Capabilities
 
@@ -51,8 +51,9 @@ Harrier embedding and Qdrant storage workloads.
 
 ## Retrieval evaluation
 
-See the [retrieval evaluation guide](evaluation/README.md) for COCO and Clotho
-MRR, Recall, NDCG, and query-latency measurements against an existing index.
+See the [retrieval evaluation guide](evaluation/README.md) for COCO image,
+Clotho audio, and RAG-Multi-Corpus document retrieval results, including Recall,
+MRR, NDCG, per-format and query-type breakdowns, and query latency.
 
 ## Profiling
 
@@ -234,7 +235,7 @@ be configured in code without changing the rest of the text pipeline.
 ## Areas of exploration
 
 - Semantic and experimental document chunking strategies.
-- Text retrieval benchmarks, profiling, and evaluation.
+- Document-retrieval throughput and query-execution optimization.
 - Optional grouping or deduplication for raw CLI audio results.
 - Speech transcription and search.
 - PDF OCR, reranking, and hybrid lexical/vector retrieval.
