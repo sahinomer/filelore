@@ -11,12 +11,14 @@ from unittest.mock import patch
 import filelore.cli as cli_module
 import filelore.index.pipeline as pipeline_module
 from filelore.audio import AudioChunkVectorizer, SoundFileAudioDecoder
+from filelore.documents import DocumentParserRegistry, ParagraphChunker
 from filelore.embedding import BaseEmbedding
 from filelore.embedding.audio import ClapAudioEmbedding
+from filelore.embedding.document import SentenceTransformerTextEmbedding
 from filelore.embedding.image import ClipImageEmbedding
 from filelore.index import FileIndexRepository, IndexCoordinator
 from filelore.metadata import AudioMetadataParser, ImageMetadataParser
-from filelore.processors import AudioProcessor, ImageProcessor
+from filelore.processors import AudioProcessor, DocumentProcessor, ImageProcessor
 from filelore.storage import QdrantVectorDatabase
 from profiling.metrics import StageRecorder
 
@@ -30,8 +32,11 @@ PIPELINE_TARGETS: tuple[tuple[object, str], ...] = (
     (pipeline_module, "calculate_file_hash"),
     (ImageMetadataParser, "parse"),
     (AudioMetadataParser, "parse"),
+    (DocumentParserRegistry, "parse"),
+    (ParagraphChunker, "chunks"),
     (ImageProcessor, "process_batch"),
     (AudioProcessor, "process_batch"),
+    (DocumentProcessor, "process_batch"),
     (AudioChunkVectorizer, "_plan_segments"),
     (SoundFileAudioDecoder, "decode"),
     (FileIndexRepository, "store_prepared_many"),
@@ -123,6 +128,14 @@ class ExternalInstrumentation:
                 measured.details["file_counts"] = {
                     queue.file_type: len(queue.paths) for queue in result.queues
                 }
+                extension_counts: dict[str, int] = {}
+                for queue in result.queues:
+                    for path in queue.paths:
+                        extension = path.suffix.casefold() or "<none>"
+                        extension_counts[extension] = (
+                            extension_counts.get(extension, 0) + 1
+                        )
+                measured.details["extension_counts"] = extension_counts
                 return result
 
         self._stack.enter_context(
@@ -169,6 +182,9 @@ class ExternalInstrumentation:
         self._patch_metadata(AudioMetadataParser, "audio")
         self._patch_processing(ImageProcessor, "image")
         self._patch_processing(AudioProcessor, "audio")
+        self._patch_document_parsing()
+        self._patch_document_chunking()
+        self._patch_processing(DocumentProcessor, "text")
 
         original_plan = AudioChunkVectorizer._plan_segments
 
@@ -282,6 +298,56 @@ class ExternalInstrumentation:
 
         self._stack.enter_context(
             patch.object(processor_type, "process_batch", process_batch)
+        )
+
+    def _patch_document_parsing(self) -> None:
+        recorder = self.recorder
+        original = DocumentParserRegistry.parse
+
+        @wraps(original)
+        def parse(instance: Any, path: Any, *args: Any, **kwargs: Any) -> Any:
+            document_path = Path(path)
+            try:
+                input_bytes = document_path.stat().st_size
+            except OSError:
+                input_bytes = None
+            with recorder.span(
+                "text.parse",
+                items=1,
+                input_bytes=input_bytes,
+                details={
+                    "path": str(document_path),
+                    "extension": document_path.suffix.casefold(),
+                },
+            ) as measured:
+                result = original(instance, path, *args, **kwargs)
+                measured.details["blocks"] = len(result.blocks)
+                return result
+
+        self._stack.enter_context(
+            patch.object(DocumentParserRegistry, "parse", parse)
+        )
+
+    def _patch_document_chunking(self) -> None:
+        recorder = self.recorder
+        original = ParagraphChunker.chunks
+
+        @wraps(original)
+        def chunks(instance: Any, document: Any) -> Any:
+            with recorder.span(
+                "text.chunking",
+                items=len(document.blocks),
+                details={"extension": document.metadata.extension},
+            ) as measured:
+                result = original(instance, document)
+                measured.details["chunks"] = len(result)
+                measured.details["characters"] = sum(
+                    len(chunk.embedding_text) for chunk in result
+                )
+                return result
+
+        self._stack.enter_context(
+            patch.object(ParagraphChunker, "chunks", chunks)
         )
 
     def _patch_storage(self) -> None:
@@ -401,6 +467,48 @@ class ExternalInstrumentation:
             self._wrap_instance_method(
                 embedding, "_prepare_vectors", "audio.vector_postprocessing"
             )
+        elif isinstance(embedding, SentenceTransformerTextEmbedding):
+            self._require_embedding_methods(
+                embedding,
+                ("_prepare_vectors",),
+            )
+            self._require_embedding_methods(
+                embedding._model,
+                ("encode", "forward"),
+            )
+            preprocessing_method = (
+                "preprocess"
+                if callable(getattr(embedding._model, "preprocess", None))
+                else "tokenize"
+            )
+            self._require_embedding_methods(
+                embedding._model,
+                (preprocessing_method,),
+            )
+            self._wrap_instance_method(
+                embedding._model,
+                "encode",
+                "text.model_encode",
+                items_arg=0,
+            )
+            self._wrap_instance_method(
+                embedding._model,
+                preprocessing_method,
+                "text.model_preprocessing",
+                items_arg=0,
+            )
+            self._wrap_gpu_method(
+                embedding._model,
+                "forward",
+                "text.gpu_forward",
+                torch_module=embedding._torch,
+                device=embedding.device,
+            )
+            self._wrap_instance_method(
+                embedding,
+                "_prepare_vectors",
+                "text.vector_postprocessing",
+            )
 
         self._wrap_instance_method(
             embedding,
@@ -414,7 +522,7 @@ class ExternalInstrumentation:
 
     @staticmethod
     def _require_embedding_methods(
-        embedding: BaseEmbedding[Any], names: Sequence[str]
+        embedding: Any, names: Sequence[str]
     ) -> None:
         missing = [
             name
@@ -470,25 +578,34 @@ class ExternalInstrumentation:
 
         setattr(instance, name, measured)
 
-    def _wrap_gpu_method(self, instance: Any, name: str, stage: str) -> None:
+    def _wrap_gpu_method(
+        self,
+        instance: Any,
+        name: str,
+        stage: str,
+        *,
+        torch_module: Any | None = None,
+        device: str | None = None,
+    ) -> None:
         original = getattr(instance, name)
         recorder = self.recorder
 
         @wraps(original)
         def measured(*args: Any, **kwargs: Any) -> Any:
-            torch_module = instance._torch
-            using_cuda = str(instance.device).startswith("cuda")
+            active_torch = torch_module or instance._torch
+            active_device = device or instance.device
+            using_cuda = str(active_device).startswith("cuda")
             items = self._infer_items(args[0]) if args else None
             if using_cuda:
-                torch_module.cuda.synchronize()
-                started = torch_module.cuda.Event(enable_timing=True)
-                finished = torch_module.cuda.Event(enable_timing=True)
+                active_torch.cuda.synchronize()
+                started = active_torch.cuda.Event(enable_timing=True)
+                finished = active_torch.cuda.Event(enable_timing=True)
                 started.record()
             with recorder.span(stage, items=items) as span:
                 result = original(*args, **kwargs)
                 if using_cuda:
                     finished.record()
-                    torch_module.cuda.synchronize()
+                    active_torch.cuda.synchronize()
                     span.cuda_ms = float(started.elapsed_time(finished))
                 return result
 
@@ -497,7 +614,11 @@ class ExternalInstrumentation:
     @staticmethod
     def _infer_items(value: Any) -> int | None:
         if isinstance(value, dict):
-            value = next(iter(value.values()), None)
+            for nested in value.values():
+                inferred = ExternalInstrumentation._infer_items(nested)
+                if inferred is not None:
+                    return inferred
+            return None
         if value is None or isinstance(value, (str, bytes, Path)):
             return None
         shape = getattr(value, "shape", None)

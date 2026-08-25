@@ -344,6 +344,9 @@ def aggregate_stages(events: Sequence[StageEvent]) -> list[dict[str, Any]]:
 def summarize_resources(samples: Sequence[ResourceSample]) -> dict[str, Any]:
     if not samples:
         return {}
+    process_cpu = [sample.process_cpu_percent for sample in samples]
+    system_cpu = [sample.system_cpu_percent for sample in samples]
+    rss_mb = [sample.rss_bytes / (1024 * 1024) for sample in samples]
     gpu_samples = [
         sample.gpu_utilization_percent
         for sample in samples
@@ -362,18 +365,20 @@ def summarize_resources(samples: Sequence[ResourceSample]) -> dict[str, Any]:
     return {
         "samples": len(samples),
         "process_cpu_average_percent": round(
-            statistics.fmean(sample.process_cpu_percent for sample in samples), 2
+            statistics.fmean(process_cpu), 2
         ),
         "process_cpu_p95_percent": round(
-            percentile([sample.process_cpu_percent for sample in samples], 0.95),
-            2,
+            percentile(process_cpu, 0.95), 2
         ),
+        "process_cpu_max_percent": round(max(process_cpu), 2),
         "system_cpu_average_percent": round(
-            statistics.fmean(sample.system_cpu_percent for sample in samples), 2
+            statistics.fmean(system_cpu), 2
         ),
-        "peak_rss_mb": round(
-            max(sample.rss_bytes for sample in samples) / (1024 * 1024), 3
-        ),
+        "system_cpu_p95_percent": round(percentile(system_cpu, 0.95), 2),
+        "system_cpu_max_percent": round(max(system_cpu), 2),
+        "rss_average_mb": round(statistics.fmean(rss_mb), 3),
+        "rss_p95_mb": round(percentile(rss_mb, 0.95), 3),
+        "peak_rss_mb": round(max(rss_mb), 3),
         "process_read_mb": round(
             max(0, samples[-1].read_bytes - samples[0].read_bytes)
             / (1024 * 1024),
@@ -395,16 +400,39 @@ def summarize_resources(samples: Sequence[ResourceSample]) -> dict[str, Any]:
             if gpu_samples
             else None
         ),
+        "gpu_memory_average_mb": (
+            round(statistics.fmean(gpu_memory), 3) if gpu_memory else None
+        ),
+        "gpu_memory_p95_mb": (
+            round(percentile(gpu_memory, 0.95), 3) if gpu_memory else None
+        ),
         "peak_gpu_memory_mb": round(max(gpu_memory), 3) if gpu_memory else None,
         "gpu_power_average_watts": (
             round(statistics.fmean(gpu_power), 2) if gpu_power else None
         ),
+        "gpu_power_p95_watts": (
+            round(percentile(gpu_power, 0.95), 2) if gpu_power else None
+        ),
+        "gpu_power_max_watts": round(max(gpu_power), 2) if gpu_power else None,
     }
 
 
 def environment_details() -> dict[str, Any]:
     packages: dict[str, str | None] = {}
-    for name in ("numpy", "Pillow", "psutil", "qdrant-client", "torch", "transformers"):
+    for name in (
+        "beautifulsoup4",
+        "markdown-it-py",
+        "numpy",
+        "Pillow",
+        "psutil",
+        "pypdf",
+        "python-docx",
+        "python-pptx",
+        "qdrant-client",
+        "sentence-transformers",
+        "torch",
+        "transformers",
+    ):
         try:
             packages[name] = version(name)
         except PackageNotFoundError:
@@ -482,6 +510,11 @@ def _markdown_summary(summary: dict[str, Any]) -> str:
     configuration = summary["configuration"]
     environment = summary["environment"]
     discovered = configuration.get("discovered_files", {})
+    discovered_extensions = configuration.get("discovered_extensions", {})
+    displayed_extensions = ", ".join(
+        f"{extension}={count}"
+        for extension, count in sorted(discovered_extensions.items())
+    )
     lines = [
         "# FileLore indexing profile",
         "",
@@ -495,14 +528,18 @@ def _markdown_summary(summary: dict[str, Any]) -> str:
         f"- Python: `{environment['python']}`",
         f"- Image directory: `{configuration.get('image_directory') or '-'}`",
         f"- Audio directory: `{configuration.get('audio_directory') or '-'}`",
+        f"- Document directory: `{configuration.get('document_directory') or '-'}`",
         f"- Index mode: `{configuration.get('index_mode') or '-'}`",
         f"- Local index path: `{configuration.get('index_path') or '-'}`",
         f"- Qdrant service URL: `{configuration.get('qdrant_url') or '-'}`",
         f"- Discovered images: `{discovered.get('image', 0)}`",
         f"- Discovered audio files: `{discovered.get('audio', 0)}`",
+        f"- Discovered documents: `{discovered.get('text', 0)}`",
+        f"- Discovered extensions: `{displayed_extensions or '-'}`",
         f"- Index batch size: `{configuration['batch_size']}`",
         f"- Image model: `{configuration['image_model']}`",
         f"- Audio model: `{configuration['audio_model']}`",
+        f"- Document model: `{configuration['document_model']}`",
         "",
         "## Stage metrics",
         "",

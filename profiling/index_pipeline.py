@@ -19,6 +19,8 @@ from filelore.embedding import (
     AudioEmbedding,
     ClapAudioEmbedding,
     ClipImageEmbedding,
+    DocumentEmbedding,
+    HarrierTextEmbedding,
     ImageEmbedding,
 )
 from filelore.storage import QdrantVectorDatabase
@@ -34,6 +36,7 @@ from profiling.metrics import (
 
 DEFAULT_IMAGE_MODEL = "openai/clip-vit-base-patch32"
 DEFAULT_AUDIO_MODEL = "laion/larger_clap_general"
+DEFAULT_DOCUMENT_MODEL = "microsoft/harrier-oss-v1-270m"
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,11 +44,13 @@ class ProfileConfiguration:
     output_directory: Path
     image_directory: Path | None = None
     audio_directory: Path | None = None
+    document_directory: Path | None = None
     index_path: Path | None = None
     qdrant_url: str | None = None
     batch_size: int = 100
     image_model: str = DEFAULT_IMAGE_MODEL
     audio_model: str = DEFAULT_AUDIO_MODEL
+    document_model: str = DEFAULT_DOCUMENT_MODEL
     device: str = "auto"
     use_fast_image_processor: bool = True
     sample_interval_ms: int = 200
@@ -83,6 +88,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="clotho_audio_evaluation directory or another audio dataset",
     )
     parser.add_argument(
+        "--document-directory",
+        type=Path,
+        help="mixed-format PDF, HTML, DOCX, PPTX, and Markdown dataset",
+    )
+    parser.add_argument(
         "--output-directory",
         type=Path,
         help="result directory (default: profiling/results/<timestamp>)",
@@ -106,6 +116,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=100)
     parser.add_argument("--image-model", default=DEFAULT_IMAGE_MODEL)
     parser.add_argument("--audio-model", default=DEFAULT_AUDIO_MODEL)
+    parser.add_argument("--document-model", default=DEFAULT_DOCUMENT_MODEL)
     parser.add_argument("--device", default="auto")
     parser.add_argument(
         "--use-fast-image-processor",
@@ -144,6 +155,11 @@ def configuration_from_args(args: argparse.Namespace) -> ProfileConfiguration:
             if args.audio_directory is not None
             else None
         ),
+        document_directory=(
+            args.document_directory.expanduser()
+            if args.document_directory is not None
+            else None
+        ),
         index_path=(
             args.index_path.expanduser() if args.index_path is not None else None
         ),
@@ -153,6 +169,7 @@ def configuration_from_args(args: argparse.Namespace) -> ProfileConfiguration:
         batch_size=args.batch_size,
         image_model=args.image_model,
         audio_model=args.audio_model,
+        document_model=args.document_model,
         device=args.device,
         use_fast_image_processor=args.use_fast_image_processor,
         sample_interval_ms=args.sample_interval_ms,
@@ -167,11 +184,15 @@ def validate_configuration(configuration: ProfileConfiguration) -> None:
     if (
         configuration.image_directory is None
         and configuration.audio_directory is None
+        and configuration.document_directory is None
     ):
-        raise ValueError("Provide at least one image or audio directory")
+        raise ValueError(
+            "Provide at least one image, audio, or document directory"
+        )
     for label, directory in (
         ("Image", configuration.image_directory),
         ("Audio", configuration.audio_directory),
+        ("Document", configuration.document_directory),
     ):
         if directory is not None and not directory.is_dir():
             raise ValueError(f"{label} directory does not exist: {directory}")
@@ -207,6 +228,7 @@ def run_profile(
     *,
     image_embedding_factory: Callable[[], ImageEmbedding] | None = None,
     audio_embedding_factory: Callable[[], AudioEmbedding] | None = None,
+    document_embedding_factory: Callable[[], DocumentEmbedding] | None = None,
 ) -> ProfileResult:
     """Run actual indexing while observing it from an external layer."""
     validate_configuration(configuration)
@@ -231,6 +253,12 @@ def run_profile(
             device=configuration.device,
         )
     )
+    document_factory = document_embedding_factory or (
+        lambda: HarrierTextEmbedding(
+            model_id=configuration.document_model,
+            device=configuration.device,
+        )
+    )
 
     with ExitStack() as stack:
         if configuration.qdrant_url is not None:
@@ -249,6 +277,9 @@ def run_profile(
         )
         profiled_audio_factory = instrumentation.profiled_factory(
             audio_factory, "audio"
+        )
+        profiled_document_factory = instrumentation.profiled_factory(
+            document_factory, "text"
         )
         sampler: ResourceSampler | None = None
         if configuration.resource_sampling:
@@ -278,6 +309,7 @@ def run_profile(
                         qdrant_url=configuration.qdrant_url,
                         image_factory=profiled_image_factory,
                         audio_factory=profiled_audio_factory,
+                        document_factory=profiled_document_factory,
                     )
                 if configuration.audio_directory is not None:
                     exit_codes["audio"] = _run_dataset(
@@ -289,6 +321,19 @@ def run_profile(
                         qdrant_url=configuration.qdrant_url,
                         image_factory=profiled_image_factory,
                         audio_factory=profiled_audio_factory,
+                        document_factory=profiled_document_factory,
+                    )
+                if configuration.document_directory is not None:
+                    exit_codes["text"] = _run_dataset(
+                        configuration.document_directory,
+                        "text",
+                        index_path,
+                        configuration.batch_size,
+                        recorder,
+                        qdrant_url=configuration.qdrant_url,
+                        image_factory=profiled_image_factory,
+                        audio_factory=profiled_audio_factory,
+                        document_factory=profiled_document_factory,
                     )
         finally:
             if call_profiler is not None:
@@ -312,32 +357,55 @@ def run_profile(
                 f"overall.{modality}",
                 f"{modality}.model_load",
                 f"{modality}.queue",
-                f"{modality}.metadata",
                 f"{modality}.processing",
                 f"{modality}.embedding",
-                f"{modality}.model_preprocessing",
-                f"{modality}.gpu_forward",
             ]
         )
     if "image" in exit_codes:
-        required.append("image.decode_convert")
+        required.extend(
+            [
+                "image.metadata",
+                "image.decode_convert",
+                "image.model_preprocessing",
+                "image.gpu_forward",
+            ]
+        )
     if "audio" in exit_codes:
         required.extend(
             [
+                "audio.metadata",
                 "audio.segment_planning",
                 "audio.decode_downmix_resample",
+                "audio.model_preprocessing",
+                "audio.gpu_forward",
                 "storage.delete_segments",
             ]
         )
-    recorder.require_stages(required)
-
+    if "text" in exit_codes:
+        required.extend(
+            [
+                "text.parse",
+                "text.chunking",
+                "text.model_encode",
+                "text.model_preprocessing",
+                "text.gpu_forward",
+                "text.vector_postprocessing",
+            ]
+        )
     discovered_files: dict[str, int] = {}
+    discovered_extensions: dict[str, int] = {}
     for event in recorder.events:
         if event.stage != "planning.discovery":
             continue
         for file_type, count in event.details.get("file_counts", {}).items():
             discovered_files[file_type] = (
                 discovered_files.get(file_type, 0) + int(count)
+            )
+        for extension, count in event.details.get(
+            "extension_counts", {}
+        ).items():
+            discovered_extensions[extension] = (
+                discovered_extensions.get(extension, 0) + int(count)
             )
 
     configuration_data = {
@@ -349,6 +417,11 @@ def run_profile(
         "audio_directory": (
             str(configuration.audio_directory.resolve())
             if configuration.audio_directory is not None
+            else None
+        ),
+        "document_directory": (
+            str(configuration.document_directory.resolve())
+            if configuration.document_directory is not None
             else None
         ),
         "index_mode": (
@@ -365,11 +438,13 @@ def run_profile(
         "batch_size": configuration.batch_size,
         "image_model": configuration.image_model,
         "audio_model": configuration.audio_model,
+        "document_model": configuration.document_model,
         "device": configuration.device,
         "use_fast_image_processor": configuration.use_fast_image_processor,
         "sample_interval_ms": configuration.sample_interval_ms,
         "resource_sampling": configuration.resource_sampling,
         "discovered_files": discovered_files,
+        "discovered_extensions": discovered_extensions,
     }
     write_profile_outputs(
         configuration.output_directory,
@@ -382,6 +457,9 @@ def run_profile(
         call_profiler.dump_stats(
             str(configuration.output_directory / "cprofile.prof")
         )
+    # Preserve an expensive completed run even if a future dependency change
+    # invalidates one of the profiler's expected observation boundaries.
+    recorder.require_stages(required)
     return ProfileResult(
         output_directory=configuration.output_directory,
         exit_codes=exit_codes,
@@ -400,6 +478,7 @@ def _run_dataset(
     qdrant_url: str | None = None,
     image_factory: Callable[[], ImageEmbedding],
     audio_factory: Callable[[], AudioEmbedding],
+    document_factory: Callable[[], DocumentEmbedding],
 ) -> int:
     arguments = [
         "--index",
@@ -421,6 +500,7 @@ def _run_dataset(
             arguments,
             image_embedding_factory=image_factory,
             audio_embedding_factory=audio_factory,
+            document_embedding_factory=document_factory,
         )
 
 
